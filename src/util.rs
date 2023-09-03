@@ -205,7 +205,10 @@ fn add_start_end(key: &str, start: &str, end: &str) -> String {
 }
 
 fn deserialize_rsa_private_key(private_key: &str) -> AlipayResult<RsaPrivateKey> {
-    RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|e| Error::Sign(e.to_string()))
+    RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|e| {
+        error!("序列化私钥出错: {}", e);
+        Error::Sign(e.to_string())
+    })
 }
 
 fn deserialize_rsa_public_key(public_key: &str) -> AlipayResult<RsaPublicKey> {
@@ -248,9 +251,13 @@ mod tests {
 
     use super::sign;
 
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     #[test]
     fn test_sign() {
-        env_logger::init();
+        init();
 
         let private_key =
             String::from_utf8(fs::read("examples/fixtures/app-private-key.pem").unwrap()).unwrap();
@@ -258,6 +265,8 @@ mod tests {
         let ac = AlipaySdkConfigBuilder::new("app111".to_owned(), private_key)
             .with_sign_type(SignType::RSA2)
             .build();
+
+        debug!("alipay sdk config: {:?}", ac);
 
         // let sdk = AlipaySDK::new(ac);
 
@@ -271,6 +280,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(data["method"], "");
+        assert_eq!(data["method"], "alipay.security.risk.content.analyze");
     }
 }

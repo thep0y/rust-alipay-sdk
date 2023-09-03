@@ -247,9 +247,31 @@ impl AlipaySdkConfigBuilder {
         self
     }
 
+    fn split_string_into_chunks(input: &str, chunk_size: usize) -> Vec<String> {
+        let mut chunks = Vec::new();
+        let mut start = 0;
+
+        while start < input.len() {
+            let end = start + chunk_size;
+            if end >= input.len() {
+                chunks.push(input[start..].to_string());
+            } else {
+                chunks.push(input[start..end].to_string());
+            }
+            start = end;
+        }
+
+        chunks
+    }
+
     /// 格式化 key
     pub fn format_key(key: &str, key_type: &str) -> String {
-        let mut item: Vec<&str> = key.split("\n").into_iter().map(|s| s.trim()).collect();
+        let mut item: Vec<&str> = key
+            .trim()
+            .split("\n")
+            .into_iter()
+            .map(|s| s.trim())
+            .collect();
 
         if item[0].contains(key_type) {
             item.remove(0);
@@ -259,10 +281,13 @@ impl AlipaySdkConfigBuilder {
             item.pop();
         }
 
+        let data = item[0];
+        let lines = Self::split_string_into_chunks(data, 64);
+
         format!(
             "-----BEGIN {}-----\n{}\n-----END {}-----",
             key_type,
-            item.join(""),
+            lines.join("\n"),
             key_type
         )
     }
@@ -746,6 +771,10 @@ mod tests {
     //     assert_eq!(config.is_ok(), true);
     // }
 
+    fn join_multilines(input: &str) -> String {
+        input.split("\n").collect::<Vec<&str>>().join("")
+    }
+
     #[test]
     fn format_key() {
         let no_wrapper_private_key =
@@ -760,18 +789,18 @@ mod tests {
             .build();
 
         assert_eq!(
-            sdk_config.private_key,
-            format!(
+            join_multilines(&sdk_config.private_key),
+            join_multilines(&format!(
                 "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
                 String::from_utf8(no_wrapper_private_key).unwrap()
-            )
+            ))
         );
         assert_eq!(
-            sdk_config.alipay_public_key,
-            format!(
+            join_multilines(&sdk_config.alipay_public_key),
+            join_multilines(&format!(
                 "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
                 public_key,
-            ),
+            )),
         )
     }
 
@@ -789,11 +818,11 @@ mod tests {
             .build();
 
         assert_eq!(
-            sdk_config.private_key,
-            format!(
+            join_multilines(&sdk_config.private_key),
+            join_multilines(&format!(
                 "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
                 pkcs8_private_key,
-            )
+            ))
         );
     }
 
