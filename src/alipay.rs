@@ -16,7 +16,7 @@ use crate::{
     ParamsMap,
 };
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+// const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
 pub enum SignType {
@@ -308,7 +308,7 @@ impl AlipaySdkConfigBuilder {
             timeout: self.timeout,
             camelcase: self.camelcase,
             charset: "utf-8".to_string(),
-            version: "1.0".to_string(),
+            version: "1.0.0".to_string(),
             key_type: self.key_type,
             app_cert_sn: self.app_cert_sn,
             alipay_root_cert_sn: self.alipay_root_cert_sn,
@@ -343,7 +343,7 @@ impl AlipaySDK {
     pub fn new(config: AlipaySdkConfig) -> Self {
         Self {
             config,
-            sdk_version: VERSION.to_string(),
+            sdk_version: "1.0.0".to_string(),
         }
     }
 

@@ -32,7 +32,9 @@ pub fn base64_decode(src: &str) -> AlipayResult<Vec<u8>> {
 fn keys_to_snake_case(data: &ParamsMap) -> ParamsMap {
     let mut new_data = serde_json::Map::<String, Value>::with_capacity(data.len());
     for (k, v) in data.iter() {
-        new_data.insert(k.to_case(Case::Snake), v.clone());
+        let new_key = k.to_case(Case::Snake);
+        trace!("new key: {}", new_key);
+        new_data.insert(new_key, v.clone());
     }
 
     new_data
@@ -103,6 +105,13 @@ pub fn sign(
         Value::String(to_time_string(now()?)),
     );
 
+    for (k, v) in params.iter() {
+        if k == "needEncrypt" || k == "bizContent" || k == "biz_content" {
+            continue;
+        }
+        sign_params.insert(k.clone(), v.clone());
+    }
+
     if config.app_cert_sn.len() > 0 && config.alipay_root_cert_sn.len() > 0 {
         sign_params.insert(
             "appCertSn".to_owned(),
@@ -120,6 +129,8 @@ pub fn sign(
             Value::String(config.ws_service_url.clone()),
         );
     }
+
+    trace!("sign params: {:?}", sign_params);
 
     // 兼容官网的 biz_content;
     if params.contains_key("bizContent") && params.contains_key("biz_content") {
@@ -151,7 +162,7 @@ pub fn sign(
 
     // params key 驼峰转下划线
     let mut decamelize_params = keys_to_snake_case(&sign_params);
-    debug!("sign_params: {:?}", decamelize_params);
+    debug!("decamelize params: {:?}", decamelize_params);
 
     // 排序
     let mut keys = decamelize_params.keys().collect::<Vec<&String>>();
@@ -161,17 +172,11 @@ pub fn sign(
         .map(|k| {
             let data = &decamelize_params[k.to_owned()];
 
-            // let v = if let Value::String(s) = data {
-            //     s.to_string()
-            // } else {
-            //     data.to_string()
-            // };
             let v = if data.is_string() {
                 data.as_str().unwrap().to_string()
             } else {
                 data.to_string()
             };
-            // let v = serde_json::to_string(data).unwrap();
             trace!("key={} value={}({})", k, v, v.len());
 
             format!("{}={}", k, encode(&v))
@@ -180,28 +185,12 @@ pub fn sign(
         .join("&");
     debug!("sign str: {}", sign_str);
 
-    // let key = hmac::Key::new(hmac::HMAC_SHA256, config.private_key.as_bytes());
-    // let sign = hmac::sign(&key, sign_str.as_bytes()).as_ref();
     let sign = sign_with_rsa(&config.private_key, &sign_str)?;
     debug!("sign: {:?}", sign);
 
     decamelize_params.insert("sign".to_owned(), serde_json::json!(base64_encode(&sign)));
 
     Ok(decamelize_params)
-}
-
-fn add_start_end(key: &str, start: &str, end: &str) -> String {
-    let mut content = key.to_owned();
-
-    if !content.contains(start) {
-        content = start.to_owned() + &content;
-    }
-
-    if !content.contains(end) {
-        content += end;
-    }
-
-    content
 }
 
 fn deserialize_rsa_private_key(private_key: &str) -> AlipayResult<RsaPrivateKey> {
@@ -247,6 +236,8 @@ pub fn verify_with_rsa(data: &[u8], public_key: &str, sign: &[u8]) -> AlipayResu
 mod tests {
     use std::fs;
 
+    use serde_json::json;
+
     use crate::alipay::{AlipaySdkConfigBuilder, SignType};
 
     use super::sign;
@@ -281,5 +272,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(data["method"], "alipay.security.risk.content.analyze");
+        assert_eq!(data["app_id"], "app111");
+        assert_eq!(data["charset"], "utf-8");
+        assert_eq!(data["version"], "1.0.0");
+        assert_eq!(data["sign_type"], "RSA2");
+        assert_eq!(data["public_args"], 1);
+        assert_eq!(data["biz_content"], json!({"a_b":1,"a_bc":"Ab"}));
+        assert_ne!(data["sign"], "");
+
+        let data2 = sign(
+            "alipay.security.risk.content.analyze".to_owned(),
+            serde_json::json!({ "publicArgs": 1, "biz_content": { "a_b": 1, "aBc": "Ab" } })
+                .as_object()
+                .unwrap()
+                .clone(),
+            &ac,
+        )
+        .unwrap();
+
+        assert_eq!(data2["biz_content"], json!({"a_b":1,"a_bc":"Ab"}));
+        assert_eq!(data["sign"], data2["sign"]);
     }
 }
