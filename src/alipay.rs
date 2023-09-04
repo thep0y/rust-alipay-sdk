@@ -1,9 +1,8 @@
 use std::{
     path::{Path, PathBuf},
-    time,
+    time::{self, Duration},
 };
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use urlencoding::{decode, encode};
 
@@ -12,8 +11,10 @@ use crate::{
     error::{AlipayResult, Error, HttpError},
     form::{AlipayForm, IField, IFile, Method},
     time::now,
-    util::{aes_decrypt, base64_decode, keys_to_camel_case, sign, verify_with_rsa},
-    ParamsMap,
+    util::{
+        aes_decrypt, base64_decode, keys_to_camel_case, sign, value_to_string, verify_with_rsa,
+    },
+    AlipaySdkCommonResult, ParamsMap,
 };
 
 // const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -84,7 +85,7 @@ pub struct AlipaySdkConfig {
     /// 签名种类
     pub sign_type: SignType,
     /// 支付宝公钥（需要对返回值做验签时候必填）
-    alipay_public_key: String,
+    alipay_public_key: Option<String>,
     gateway: String,
     timeout: time::Duration,
     camelcase: bool,
@@ -107,8 +108,8 @@ impl AlipaySdkConfig {
         &self.private_key
     }
 
-    pub fn alipay_public_key(&self) -> &str {
-        &self.alipay_public_key
+    pub fn alipay_public_key(&self) -> Option<&str> {
+        self.alipay_public_key.as_deref()
     }
 }
 
@@ -121,7 +122,7 @@ pub struct AlipaySdkConfigBuilder {
     /// 签名种类
     sign_type: SignType,
     /// 支付宝公钥（需要对返回值做验签时候必填）
-    alipay_public_key: String,
+    alipay_public_key: Option<String>,
     gateway: String,
     timeout: time::Duration,
     camelcase: bool,
@@ -182,7 +183,7 @@ impl AlipaySdkConfigBuilder {
     ) -> AlipayResult<Self> {
         self.alipay_cert_sn = get_sn(content.as_ref(), false)?;
         let alipay_public_key = load_public_key(content)?;
-        self.alipay_public_key = Self::format_key(&alipay_public_key, "PUBLIC KEY");
+        self.alipay_public_key = Some(Self::format_key(&alipay_public_key, "PUBLIC KEY"));
         Ok(self)
     }
 
@@ -192,7 +193,7 @@ impl AlipaySdkConfigBuilder {
     ) -> AlipayResult<Self> {
         self.alipay_cert_sn = get_sn_from_path(file_path.as_ref(), false)?;
         let alipay_public_key = load_public_key_from_path(file_path)?;
-        self.alipay_public_key = Self::format_key(&alipay_public_key, "PUBLIC KEY");
+        self.alipay_public_key = Some(Self::format_key(&alipay_public_key, "PUBLIC KEY"));
         Ok(self)
     }
 
@@ -213,7 +214,7 @@ impl AlipaySdkConfigBuilder {
     }
 
     pub fn with_alipay_public_key(mut self, alipay_public_key: String) -> Self {
-        self.alipay_public_key = Self::format_key(&alipay_public_key, "PUBLIC KEY");
+        self.alipay_public_key = Some(Self::format_key(&alipay_public_key, "PUBLIC KEY"));
         self
     }
 
@@ -266,12 +267,13 @@ impl AlipaySdkConfigBuilder {
 
     /// 格式化 key
     pub fn format_key(key: &str, key_type: &str) -> String {
-        let mut item: Vec<&str> = key
-            .trim()
-            .split("\n")
-            .into_iter()
-            .map(|s| s.trim())
-            .collect();
+        let key = key.trim();
+
+        if key.is_empty() {
+            return key.to_string();
+        }
+
+        let mut item: Vec<&str> = key.split("\n").into_iter().map(|s| s.trim()).collect();
 
         if item[0].contains(key_type) {
             item.remove(0);
@@ -298,6 +300,7 @@ impl AlipaySdkConfigBuilder {
         // }
 
         let private_key = Self::format_key(&self.private_key, self.key_type.to_str());
+        if self.timeout == Duration::new(0, 0) {}
 
         AlipaySdkConfig {
             app_id: self.app_id,
@@ -305,7 +308,11 @@ impl AlipaySdkConfigBuilder {
             sign_type: self.sign_type,
             alipay_public_key: self.alipay_public_key,
             gateway: self.gateway,
-            timeout: self.timeout,
+            timeout: if self.timeout == Duration::new(0, 0) {
+                Duration::new(5, 0)
+            } else {
+                self.timeout
+            },
             camelcase: self.camelcase,
             charset: "utf-8".to_string(),
             version: "1.0.0".to_string(),
@@ -317,15 +324,6 @@ impl AlipaySdkConfigBuilder {
             ws_service_url: self.ws_service_url,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AlipaySdkCommonResult {
-    code: String,
-    msg: String,
-    sub_code: Option<String>,
-    sub_msg: Option<String>,
-    // result: HashMap<>
 }
 
 #[derive(Debug)]
@@ -348,7 +346,7 @@ impl AlipaySDK {
     }
 
     /// 格式化请求 url（按规范把某些固定的参数放入 url）
-    fn format_url<'a>(url: &str, params: ParamsMap) -> (ParamsMap, String) {
+    fn format_url(url: &str, params: ParamsMap) -> (ParamsMap, String) {
         let mut request_url = url.to_string();
 
         let url_args = vec![
@@ -377,8 +375,8 @@ impl AlipaySDK {
         let mut params = params.clone();
 
         for key in &keys_to_remove {
-            let val = &params[key.to_owned()].to_string();
-            let val = encode(val);
+            let val = value_to_string(&params[key.to_owned()]);
+            let val = encode(&val);
 
             if request_url.contains("?") {
                 request_url += &format!("&{}={}", key, val);
@@ -425,6 +423,7 @@ impl AlipaySDK {
     /// 生成请求字符串，用于客户端进行调用
     pub fn sdk_exec(&self, method: String, params: ParamsMap) -> AlipayResult<String> {
         let data = sign(method, params, &self.config)?;
+        trace!("sdk request data: {:?}", data);
 
         let sdk_str = data
             .iter()
@@ -473,6 +472,8 @@ impl AlipaySDK {
                 .collect::<Vec<String>>()
                 .join("&");
 
+            trace!("params: {}", query);
+
             return Ok(format!("{}&{}", url, query));
         }
 
@@ -502,6 +503,7 @@ impl AlipaySDK {
     /// 消息验签
     fn notify_rsa_check(
         &self,
+        alipay_public_key: &str,
         sign_args: &ParamsMap,
         sign_str: &str,
         sign_type: &SignType,
@@ -530,7 +532,7 @@ impl AlipaySDK {
 
         verify_with_rsa(
             sign_content.as_bytes(),
-            &self.config.alipay_public_key,
+            alipay_public_key,
             &base64_decode(sign_str)?,
         )
     }
@@ -566,7 +568,7 @@ impl AlipaySDK {
         validate_str = &validate_str[validate_str.find("{").unwrap_or(0)..];
 
         // 删除最后一个 } 之后的任何字符
-        validate_str = &validate_str[..validate_str.rfind("}").unwrap_or(0)];
+        validate_str = &validate_str[..validate_str.rfind("}").unwrap_or(0) + 1];
 
         validate_str.to_owned()
     }
@@ -588,6 +590,9 @@ impl AlipaySDK {
         let sign_data = sign(method.clone(), params.params, &self.config)?;
         let (exec_params, url) = Self::format_url(&self.config.gateway, sign_data);
 
+        trace!("exec_params: {:?}", exec_params);
+        trace!("url: {}", url);
+
         let resp = ureq::post(&url)
             .set("user-agent", &self.sdk_version)
             .timeout(self.config.timeout)
@@ -595,7 +600,7 @@ impl AlipaySDK {
 
         if resp.status() != 200 {
             return Err(Error::Http(HttpError::new(
-                &resp.into_string()?,
+                resp.into_json()?,
                 "[AlipaySdk]HTTP 请求错误",
             )));
         }
@@ -616,7 +621,7 @@ impl AlipaySDK {
             r
         } else {
             return Err(Error::Http(HttpError::new(
-                &json.to_string(),
+                serde_json::from_value(json).unwrap(),
                 "[AlipaySdk]响应体为空",
             )));
         };
@@ -626,7 +631,7 @@ impl AlipaySDK {
             Some(d) => d.clone(),
             None => {
                 return Err(Error::Http(HttpError::new(
-                    &json.to_string(),
+                    serde_json::from_value(json).unwrap(),
                     "[AlipaySdk]HTTP 请求错误",
                 )))
             }
@@ -639,14 +644,14 @@ impl AlipaySDK {
 
         // 按字符串验签
         let validate_success = if params.validate_sign {
-            self.check_response_sign(&json.to_string(), &response_key)
+            self.check_response_sign(&json.to_string(), &response_key)?
         } else {
             true
         };
 
         if !validate_success {
             return Err(Error::Http(HttpError::new(
-                &json.to_string(),
+                serde_json::from_value(json).unwrap(),
                 "[AlipaySdk]验签失败",
             )));
         }
@@ -661,76 +666,105 @@ impl AlipaySDK {
     }
 
     // 结果验签
-    fn check_response_sign(&self, sign_str: &str, response_key: &str) -> bool {
-        if self.config.alipay_public_key.is_empty() {
-            // 支付宝公钥不存在时不做验签
-            return true;
-        }
+    fn check_response_sign(&self, sign_str: &str, response_key: &str) -> AlipayResult<bool> {
+        match &self.config.alipay_public_key {
+            None => Ok(true), // 支付宝公钥不存在时不做验签
+            Some(alipay_public_key) => {
+                trace!("alipay public key :{}", alipay_public_key);
+                if alipay_public_key.is_empty() {
+                    // 支付宝公钥不存在时不做验签
+                    return Ok(true);
+                }
+                // 带验签的参数不存在时返回失败
+                if sign_str.is_empty() {
+                    return Ok(false);
+                }
 
-        // 带验签的参数不存在时返回失败
-        if sign_str.is_empty() {
-            return false;
-        }
+                trace!("response key: {}", response_key);
 
-        // 根据服务端返回的结果截取需要验签的目标字符串
-        let validate_str = Self::get_sign_str(sign_str, response_key);
-        // 服务端返回的签名
-        let sign_value = serde_json::from_str::<Value>(sign_str).unwrap();
-        let server_sign = sign_value.get("sign").unwrap();
+                // 根据服务端返回的结果截取需要验签的目标字符串
+                let validate_str = Self::get_sign_str(sign_str, response_key);
+                debug!("validate str: {}", validate_str);
 
-        // 参数存在，并且是正常的结果（不包含 sub_code）时才验签
-        match verify_with_rsa(
-            validate_str.as_bytes(),
-            &self.config.alipay_public_key,
-            server_sign.to_string().as_bytes(),
-        ) {
-            Ok(()) => true,
-            Err(_) => false,
+                // 服务端返回的签名
+                let sign_value = serde_json::from_str::<Value>(sign_str).unwrap();
+                let server_sign_base64 = sign_value.get("sign").unwrap();
+                trace!("server sign: {}", server_sign_base64);
+
+                let server_sign = base64_decode(&value_to_string(server_sign_base64))?;
+
+                // 参数存在，并且是正常的结果（不包含 sub_code）时才验签
+                match verify_with_rsa(validate_str.as_bytes(), &alipay_public_key, &server_sign) {
+                    Ok(()) => Ok(true),
+                    Err(_) => Ok(false),
+                }
+            }
         }
     }
 
     fn check_notify_sign(&self, post_data: ParamsMap, raw: bool) -> bool {
-        let sign_str = post_data["sign"].to_string();
+        match &self.config.alipay_public_key {
+            None => false, // 未设置“支付宝公钥”或签名字符串不存，验签不通过
+            Some(alipay_public_key) => {
+                // 未设置“支付宝公钥”或签名字符串不存，验签不通过
+                if alipay_public_key.is_empty() {
+                    return false;
+                }
 
-        // 未设置“支付宝公钥”或签名字符串不存，验签不通过
-        if self.config.alipay_public_key.is_empty() || sign_str.is_empty() {
-            return false;
-        }
+                let sign_str = post_data["sign"].to_string();
+                // 未设置“支付宝公钥”或签名字符串不存，验签不通过
+                if sign_str.is_empty() {
+                    return false;
+                }
 
-        // 先从签名字符串中取 sign_type，再取配置项、都不存在时默认为 RSA2（RSA 已不再推荐使用）
-        let sign_type = match post_data.get("sign_type") {
-            Some(v) => v.clone(),
-            None => match post_data.get("signType") {
-                Some(v) => v.clone(),
-                None => Value::String("RSA2".to_string()),
-            },
-        };
+                // 先从签名字符串中取 sign_type，再取配置项、都不存在时默认为 RSA2（RSA 已不再推荐使用）
+                let sign_type = match post_data.get("sign_type") {
+                    Some(v) => v.clone(),
+                    None => match post_data.get("signType") {
+                        Some(v) => v.clone(),
+                        None => Value::String("RSA2".to_string()),
+                    },
+                };
 
-        let mut sign_args = post_data.clone();
-        // 除去 sign
-        sign_args.remove("sign");
+                let mut sign_args = post_data.clone();
+                // 除去 sign
+                sign_args.remove("sign");
 
-        // 某些用户可能自己删除了 sign_type 后再验签
-        // 为了保持兼容性临时把 sign_type 加回来
-        // 因为下面的逻辑会验签 2 次所以不会存在验签不同过的情况
-        sign_args.insert("sign_type".to_owned(), sign_type.clone());
+                // 某些用户可能自己删除了 sign_type 后再验签
+                // 为了保持兼容性临时把 sign_type 加回来
+                // 因为下面的逻辑会验签 2 次所以不会存在验签不同过的情况
+                sign_args.insert("sign_type".to_owned(), sign_type.clone());
 
-        let sign_type = SignType::from_str(&sign_type.to_string());
+                let sign_type = SignType::from_str(&sign_type.to_string());
 
-        // 保留 sign_type 验证一次签名
-        let verify_result = self.notify_rsa_check(&sign_args, &sign_str, &sign_type, raw);
+                // 保留 sign_type 验证一次签名
+                let verify_result = self.notify_rsa_check(
+                    &alipay_public_key,
+                    &sign_args,
+                    &sign_str,
+                    &sign_type,
+                    raw,
+                );
 
-        if verify_result.is_ok() {
-            return true;
-        }
+                if verify_result.is_ok() {
+                    return true;
+                }
 
-        // 删除 sign_type 验一次
-        // 因为“历史原因”需要用户自己判断是否需要保留 sign_type 验证签名
-        // 这里是把其他 sdk 中的 rsaCheckV1、rsaCheckV2 做了合并
-        sign_args.remove("sign_type");
-        match self.notify_rsa_check(&sign_args, &sign_str, &sign_type, raw) {
-            Ok(()) => true,
-            Err(_) => false,
+                // 删除 sign_type 验一次
+                // 因为“历史原因”需要用户自己判断是否需要保留 sign_type 验证签名
+                // 这里是把其他 sdk 中的 rsaCheckV1、rsaCheckV2 做了合并
+                sign_args.remove("sign_type");
+                match self.notify_rsa_check(
+                    &alipay_public_key,
+                    &sign_args,
+                    &sign_str,
+                    &sign_type,
+                    raw,
+                ) {
+                    Ok(()) => true,
+                    Err(_) => false,
+                }
+            }
         }
     }
 }
@@ -746,17 +780,17 @@ pub struct ExecParams {
 mod tests {
     use std::{fs, time::Duration};
 
-    use serde_json::json;
-
-    use crate::error::Error;
-
     use super::{AlipaySDK, AlipaySdkConfigBuilder};
 
     const PRIVATE_KEY: &str = include_str!("../examples/fixtures/app-private-key.pem");
-    const ALIPAY_PUBLIC_KEY: &str = include_str!("../examples/fixtures/app-public-key.pem");
+    const ALIPAY_PUBLIC_KEY: &str = include_str!("../examples/fixtures/alipay-public-key.pem");
 
-    const APP_ID: &str = "2021000122671080";
+    const APP_ID: &str = "9021000126650292";
     const GATE_WAY: &str = "https://openapi-sandbox.dl.alipaydev.com/gateway.do";
+
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
 
     // #[test]
     // fn builder() {
@@ -777,6 +811,8 @@ mod tests {
 
     #[test]
     fn format_key() {
+        init();
+
         let no_wrapper_private_key =
             fs::read("examples/fixtures/app-private-key-no-wrapper.pem").unwrap();
         let no_wrapper_public_key =
@@ -796,7 +832,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            join_multilines(&sdk_config.alipay_public_key),
+            join_multilines(&sdk_config.alipay_public_key.unwrap()),
             join_multilines(&format!(
                 "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
                 public_key,
@@ -806,6 +842,8 @@ mod tests {
 
     #[test]
     fn format_key_with_pkcs8() {
+        init();
+
         let pkcs8_private_key = String::from_utf8(
             fs::read("examples/fixtures/app-private-key-pkcs8-no-wrapper.pem").unwrap(),
         )
@@ -826,38 +864,121 @@ mod tests {
         );
     }
 
+    fn new_sdk() -> AlipaySDK {
+        let sdk_config = AlipaySdkConfigBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+            .with_gateway(GATE_WAY.to_string())
+            .with_sign_type(super::SignType::RSA2)
+            .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+            .with_timeout(Duration::from_millis(10000))
+            .with_encrypt_key("aYA0GP8JEW+D7/UFaskCWA==".to_string())
+            .enable_camelcase()
+            .build();
+
+        let sdk = AlipaySDK::new(sdk_config);
+
+        sdk
+    }
+
     // #[test]
-    // fn execute() {
-    //     let sdk_config = AlipaySdkConfigBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
-    //         .with_gateway(GATE_WAY.to_string())
-    //         .with_sign_type(super::SignType::RSA2)
-    //         .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
-    //         .with_timeout(Duration::from_millis(10000))
-    //         .with_encrypt_key("aYA0GP8JEW+D7/UFaskCWA==".to_string())
-    //         .enable_camelcase()
-    //         .build()
-    //         .unwrap();
+    // fn test_camelcase() {
+    //     init();
     //
-    //     let sdk = AlipaySDK::new(sdk_config);
+    //     let sdk = new_sdk();
     //
     //     let res = sdk.exec(
     //         "alipay.security.risk.content.analyze".to_string(),
     //         super::ExecParams {
     //             form_data: None,
     //             params: json!({
-    //                         "bizContent": {
-    //               "account_type": "MOBILE_NO",
-    //               "account": "13812345678",
-    //               "version": "2.0",
-    //             }
+    //               "bizContent": {
+    //                 "account_type": "MOBILE_NO",
+    //                 "account": "13812345678",
+    //                 "version": "2.0",
+    //               },
+    //               "publicArgs": {}
     //             })
     //             .as_object()
     //             .unwrap()
     //             .clone(),
     //             need_encrypt: false,
-    //             validate_sign: false,
+    //             validate_sign: true,
     //         },
     //     );
     //     assert_eq!(res.unwrap_err().to_string(), "");
     // }
+
+    #[test]
+    fn test_check_response_sign_alipay_public_key_is_null() {
+        init();
+
+        let config = AlipaySdkConfigBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+            .with_gateway(GATE_WAY.to_string())
+            // .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+            .enable_camelcase()
+            .build();
+        let sdk = AlipaySDK::new(config);
+
+        let sign_str = r#"{"alipay_offline_material_image_upload_response":{"code":"10000","msg":"Success","image_id":"1ni-WScMQcWsJRE2AYCo9AAAACMAAQED","image_url":"http:\/\/oalipay-dl-django.alicdn.com\/rest\/1.0\/image?fileIds=1ni-WScMQcWsJRE2AYCo9AAAACMAAQED&zoom=original"},"sign":"K7s88WHQO91LPY+QGbdRtr3rXQWUxDEKvPrVsLfy+r9R4CSK1qbvHkrJ9DXwzm0pdTQPP8xbLl6rSsOiq33f32ZOhX/XzMbOfiC3OLnHHVaH7+rneNopUj1sZQDvz+dUoIMYSQHFLEECKADiJ66S8i5gXD1Hne7aj0b/1LYGPhtxbJdkT8OTDjxd/X/HmVy5xjZShOnM3WcwxUVNyqdOE2BEZbS8Q8P4W20PP/EhZ31N4mOIsCuUNiikhU0tnwjH2pHcv/fh7wzqkEhn1gIHc13o9O7xi4w1hHdQV811bn+n8d+98o+ETClebBQieqA+irBQaXvYTmZi3H+8RJiGwA=="}"#;
+
+        let result =
+            sdk.check_response_sign(sign_str, "alipay_offline_material_image_upload_response");
+
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn test_check_response_sign_alipay_public_key_is_empty() {
+        init();
+
+        let config = AlipaySdkConfigBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+            .with_gateway(GATE_WAY.to_string())
+            .with_alipay_public_key(String::new())
+            .enable_camelcase()
+            .build();
+        let sdk = AlipaySDK::new(config);
+
+        let sign_str = r#"{"alipay_offline_material_image_upload_response":{"code":"10000","msg":"Success","image_id":"1ni-WScMQcWsJRE2AYCo9AAAACMAAQED","image_url":"http:\/\/oalipay-dl-django.alicdn.com\/rest\/1.0\/image?fileIds=1ni-WScMQcWsJRE2AYCo9AAAACMAAQED&zoom=original"},"sign":"K7s88WHQO91LPY+QGbdRtr3rXQWUxDEKvPrVsLfy+r9R4CSK1qbvHkrJ9DXwzm0pdTQPP8xbLl6rSsOiq33f32ZOhX/XzMbOfiC3OLnHHVaH7+rneNopUj1sZQDvz+dUoIMYSQHFLEECKADiJ66S8i5gXD1Hne7aj0b/1LYGPhtxbJdkT8OTDjxd/X/HmVy5xjZShOnM3WcwxUVNyqdOE2BEZbS8Q8P4W20PP/EhZ31N4mOIsCuUNiikhU0tnwjH2pHcv/fh7wzqkEhn1gIHc13o9O7xi4w1hHdQV811bn+n8d+98o+ETClebBQieqA+irBQaXvYTmZi3H+8RJiGwA=="}"#;
+
+        let result =
+            sdk.check_response_sign(sign_str, "alipay_offline_material_image_upload_response");
+
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn test_check_response_sign_sign_str_is_empty() {
+        init();
+
+        let config = AlipaySdkConfigBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+            .with_gateway(GATE_WAY.to_string())
+            .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+            .enable_camelcase()
+            .build();
+        let sdk = AlipaySDK::new(config);
+
+        let sign_str = "";
+
+        let result =
+            sdk.check_response_sign(sign_str, "alipay_offline_material_image_upload_response");
+
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn test_check_response_sign_normal() {
+        init();
+
+        let config = AlipaySdkConfigBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+            .with_gateway(GATE_WAY.to_string())
+            .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+            .enable_camelcase()
+            .build();
+        let sdk = AlipaySDK::new(config);
+
+        let sign_str = r#"{"alipay_open_file_upload_response":{"code":"10000","msg":"Success","file_id":"CAxAToWB1JsAAAAAAAAAAAAADgSLAQBr"},"sign":"F+LDzpTNiavn7xVZPGuPCSSVRSmWzJGgtuji6tVELGEaqMaNj0jRKXUEr5nloZJBBmwEnddOyCjjepMmrTKTvoOqQ0Efxpr/R1iEeHTHVbb/Q8TTh6Up5gHJDkILdaWS2q1cWeQ6VT+HQY9P3WRXS7uhILHuDODIhpAyCu5KhWGt0rMCIG+Im6NODJP2oohtSCtmTFXg58HH587Z2y2bdbjzOxLvzD9IrU1imghXQ2S/Q+wMIvRk9on6cWnBLkrNvJKapA2ReNGWOwyuASvB9zDVzhMPbR+3mfRGkVDxsq5HYLjBKGskJMXHw0HuugZij6ScRuaLPODhmHwr/pJ9yw=="}"#;
+
+        let result = sdk.check_response_sign(sign_str, "alipay_open_file_upload_response");
+
+        assert_eq!(result.unwrap(), true);
+    }
 }

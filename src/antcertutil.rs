@@ -1,15 +1,17 @@
-use base64::{engine::general_purpose, Engine};
 use std::{fs, path::Path};
 use x509_parser::prelude::*;
 
-use crate::error::{AlipayResult, Error};
+use crate::{
+    error::{AlipayResult, Error},
+    util::base64_encode,
+};
 
 /// 从公钥证书文件里读取支付宝公钥
 pub(crate) fn load_public_key_from_path<P: AsRef<Path>>(file_path: P) -> AlipayResult<String> {
     let file_data = fs::read(file_path)?;
     let (_, cert) =
         X509Certificate::from_der(&file_data).map_err(|e| Error::X509(e.to_string()))?;
-    let encoded: String = general_purpose::STANDARD_NO_PAD.encode(cert.public_key().raw);
+    let encoded = base64_encode(cert.public_key().raw);
 
     Ok(encoded)
 }
@@ -18,7 +20,7 @@ pub(crate) fn load_public_key_from_path<P: AsRef<Path>>(file_path: P) -> AlipayR
 pub(crate) fn load_public_key<B: AsRef<[u8]>>(content: B) -> AlipayResult<String> {
     let (_, cert) =
         X509Certificate::from_der(content.as_ref()).map_err(|e| Error::X509(e.to_string()))?;
-    let encoded: String = general_purpose::STANDARD_NO_PAD.encode(cert.public_key().raw);
+    let encoded = base64_encode(cert.public_key().raw);
 
     Ok(encoded)
 }

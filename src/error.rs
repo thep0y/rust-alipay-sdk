@@ -1,15 +1,24 @@
 use std::{fmt::Display, string, time::SystemTimeError};
 
+use serde::{Deserialize, Serialize};
+
+use crate::AlipaySdkCommonResult;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AlipaySecurityRiskContentAnalyzeResponse {
+    alipay_security_risk_content_analyze_response: AlipaySdkCommonResult,
+}
+
 #[derive(Debug)]
 pub struct HttpError {
-    result: String,
+    result: AlipaySecurityRiskContentAnalyzeResponse,
     msg: String,
 }
 
 impl HttpError {
-    pub(crate) fn new(result: &str, msg: &str) -> Self {
+    pub(crate) fn new(result: AlipaySecurityRiskContentAnalyzeResponse, msg: &str) -> Self {
         Self {
-            result: result.to_owned(),
+            result,
             msg: msg.to_owned(),
         }
     }
@@ -17,7 +26,7 @@ impl HttpError {
 
 impl Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{result: {}, msg: {}}}", self.result, self.msg)
+        write!(f, "{{result: {:?}, msg: {}}}", self.result, self.msg)
     }
 }
 
@@ -45,6 +54,8 @@ pub enum Error {
     Http(HttpError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type AlipayResult<T> = std::result::Result<T, Error>;

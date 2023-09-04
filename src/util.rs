@@ -26,7 +26,19 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 pub fn base64_decode(src: &str) -> AlipayResult<Vec<u8>> {
-    Ok(Base64::decode_vec(src)?)
+    trace!("base64 decode source: {}", src);
+    Ok(Base64::decode_vec(src).map_err(|e| {
+        error!("解码 base64 出错：{}", e);
+        e
+    })?)
+}
+
+pub fn value_to_string(value: &Value) -> String {
+    if value.is_string() {
+        value.as_str().unwrap().to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn keys_to_snake_case(data: &ParamsMap) -> ParamsMap {
@@ -195,13 +207,16 @@ pub fn sign(
 
 fn deserialize_rsa_private_key(private_key: &str) -> AlipayResult<RsaPrivateKey> {
     RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|e| {
-        error!("序列化私钥出错: {}", e);
+        error!("反序列化私钥出错: {}", e);
         Error::Sign(e.to_string())
     })
 }
 
 fn deserialize_rsa_public_key(public_key: &str) -> AlipayResult<RsaPublicKey> {
-    RsaPublicKey::from_public_key_pem(public_key).map_err(|e| Error::Sign(e.to_string()))
+    RsaPublicKey::from_public_key_pem(public_key).map_err(|e| {
+        error!("反序列公私钥出错: {}", e);
+        Error::Sign(e.to_string())
+    })
 }
 
 pub fn sign_with_rsa(private_key: &str, sign_str: &str) -> AlipayResult<Vec<u8>> {
@@ -216,6 +231,9 @@ pub fn sign_with_rsa(private_key: &str, sign_str: &str) -> AlipayResult<Vec<u8>>
     Ok(signature)
 }
 
+/// 验签。
+///
+/// 需要注意，sign 应该是 base64 decode 后的数据，不要直接将 base64str.as_bytes() 作为 sign 传入
 pub fn verify_with_rsa(data: &[u8], public_key: &str, sign: &[u8]) -> AlipayResult<()> {
     let public_key = deserialize_rsa_public_key(public_key)?;
 
@@ -226,7 +244,7 @@ pub fn verify_with_rsa(data: &[u8], public_key: &str, sign: &[u8]) -> AlipayResu
     match public_key.verify(padding, &hasher.finalize(), sign) {
         Ok(()) => Ok(()),
         Err(e) => {
-            error!("{}", e);
+            error!("验签错误: {}", e);
             Err(Error::Sign(e.to_string()))
         }
     }
