@@ -214,7 +214,7 @@ fn deserialize_rsa_private_key(private_key: &str) -> AlipayResult<RsaPrivateKey>
 
 fn deserialize_rsa_public_key(public_key: &str) -> AlipayResult<RsaPublicKey> {
     RsaPublicKey::from_public_key_pem(public_key).map_err(|e| {
-        error!("反序列公私钥出错: {}", e);
+        error!("反序列化公钥出错: {}", e);
         Error::Sign(e.to_string())
     })
 }
@@ -235,6 +235,7 @@ pub fn sign_with_rsa(private_key: &str, sign_str: &str) -> AlipayResult<Vec<u8>>
 ///
 /// 需要注意，sign 应该是 base64 decode 后的数据，不要直接将 base64str.as_bytes() 作为 sign 传入
 pub fn verify_with_rsa(data: &[u8], public_key: &str, sign: &[u8]) -> AlipayResult<()> {
+    // TODO: 根据 sign type 使用不同的 digital, 默认使用 Pkcs1v15Sign
     let public_key = deserialize_rsa_public_key(public_key)?;
 
     let mut hasher = Sha256::new();
@@ -256,7 +257,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::alipay::{AlipaySdkConfigBuilder, SignType};
+    use crate::alipay::{AlipaySdkBuilder, SignType};
 
     use super::sign;
 
@@ -271,11 +272,11 @@ mod tests {
         let private_key =
             String::from_utf8(fs::read("examples/fixtures/app-private-key.pem").unwrap()).unwrap();
 
-        let ac = AlipaySdkConfigBuilder::new("app111".to_owned(), private_key)
+        let sdk = AlipaySdkBuilder::new("app111".to_owned(), private_key)
             .with_sign_type(SignType::RSA2)
             .build();
 
-        debug!("alipay sdk config: {:?}", ac);
+        debug!("alipay sdk config: {:?}", sdk.config);
 
         let data = sign(
             "alipay.security.risk.content.analyze".to_owned(),
@@ -283,7 +284,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .clone(),
-            &ac,
+            &sdk.config,
         )
         .unwrap();
 
@@ -302,7 +303,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .clone(),
-            &ac,
+            &sdk.config,
         )
         .unwrap();
 
