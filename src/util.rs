@@ -259,8 +259,6 @@ mod tests {
 
         debug!("alipay sdk config: {:?}", ac);
 
-        // let sdk = AlipaySDK::new(ac);
-
         let data = sign(
             "alipay.security.risk.content.analyze".to_owned(),
             serde_json::json!({ "publicArgs": 1, "bizContent": { "a_b": 1, "aBc": "Ab" } })

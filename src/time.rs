@@ -70,9 +70,14 @@ mod test {
 
     #[test]
     fn time_string() {
-        let duration = Duration::new(1693580767542 / 1000, 0);
+        let duration = Duration::new(1693580767, 0);
         let time_str = to_time_string(duration);
 
         assert_eq!(time_str, "2023-09-01 23:06:07");
+
+        let duration = Duration::new(1709219167, 0);
+        let time_str = to_time_string(duration);
+
+        assert_eq!(time_str, "2024-02-29 23:06:07");
     }
 }
