@@ -32,14 +32,14 @@ impl Default for SignType {
 }
 
 impl SignType {
-    pub fn as_str(&self) -> &str {
+    pub fn to_str(&self) -> &str {
         match self {
             SignType::RSA => "RSA",
             SignType::RSA2 => "RSA2",
         }
     }
 
-    pub fn as_string(&self) -> String {
+    pub fn to_string(&self) -> String {
         match self {
             SignType::RSA => String::from("RSA"),
             SignType::RSA2 => String::from("RSA2"),

@@ -110,7 +110,7 @@ pub fn sign(
     sign_params.insert("version".to_owned(), Value::String(config.version.clone()));
     sign_params.insert(
         "signType".to_owned(),
-        Value::String(config.sign_type.as_string()),
+        Value::String(config.sign_type.to_string()),
     );
     sign_params.insert(
         "timestamp".to_owned(),
