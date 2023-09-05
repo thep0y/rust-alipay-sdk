@@ -1,9 +1,8 @@
 use serde_json::Value;
 
 pub struct IFile {
-    pub(crate) name: String,
     pub(crate) path: String,
-    field_name: String,
+    pub(crate) field_name: String,
 }
 
 pub struct IField {
@@ -69,9 +68,8 @@ impl AlipayForm {
     }
 
     /// 增加文件
-    pub fn add_file(&mut self, field_name: String, file_name: String, file_path: String) {
+    pub fn add_file(&mut self, field_name: String, file_path: String) {
         self.files.push(IFile {
-            name: file_name,
             path: file_path,
             field_name,
         })

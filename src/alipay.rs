@@ -432,7 +432,7 @@ impl AlipaySDK {
 
         for file in files.iter() {
             // 文件名需要转换驼峰为下划线
-            let file_key = file.name.to_case(Case::Snake);
+            let file_key = file.field_name.to_case(Case::Snake);
             // 处理文件类型
             form.add_file(file_key, file.path.clone());
         }
