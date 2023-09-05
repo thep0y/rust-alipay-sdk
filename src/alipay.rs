@@ -1,9 +1,13 @@
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     time::{self, Duration},
 };
 
+use rsa::{
+    pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, sha2::Sha256, Pkcs1v15Sign, RsaPrivateKey,
+};
 use serde_json::Value;
+use sha1::Sha1;
 use urlencoding::{decode, encode};
 
 use crate::{
@@ -27,7 +31,7 @@ pub enum SignType {
 
 impl Default for SignType {
     fn default() -> Self {
-        SignType::RSA
+        SignType::RSA2
     }
 }
 
@@ -52,6 +56,13 @@ impl SignType {
             _ => Self::RSA2,
         }
     }
+
+    pub fn signature(&self) -> Pkcs1v15Sign {
+        match self {
+            SignType::RSA => Pkcs1v15Sign::new::<Sha1>(),
+            _ => Pkcs1v15Sign::new::<Sha256>(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -71,6 +82,19 @@ impl KeyType {
         match self {
             KeyType::PKCS1 => "RSA PRIVATE KEY",
             KeyType::PKCS8 => "PRIVATE KEY",
+        }
+    }
+
+    pub fn deserialize_rsa_private_key(&self, private_key: &str) -> AlipayResult<RsaPrivateKey> {
+        match self {
+            KeyType::PKCS1 => RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|e| {
+                error!("反序列化私钥出错: {}", e);
+                Error::Sign(e.to_string())
+            }),
+            KeyType::PKCS8 => RsaPrivateKey::from_pkcs8_pem(private_key).map_err(|e| {
+                error!("反序列化私钥出错: {}", e);
+                Error::Sign(e.to_string())
+            }),
         }
     }
 }
@@ -94,7 +118,7 @@ pub struct AlipaySdkConfig {
     pub key_type: KeyType,
     pub app_cert_sn: String,
     pub alipay_root_cert_sn: String,
-    alipay_cert_sn: String,
+    // alipay_cert_sn: String,
     pub encrypt_key: String,
     pub ws_service_url: String,
 }
@@ -122,16 +146,9 @@ pub struct AlipaySdkBuilder {
     gateway: String,
     timeout: time::Duration,
     camelcase: bool,
-    version: String,
     key_type: KeyType,
-    app_cert_path: PathBuf,
-    app_cert_content: String,
     app_cert_sn: String,
-    alipay_root_cert_path: String,
-    alipay_root_cert_content: String,
     alipay_root_cert_sn: String,
-    alipay_public_cert_path: String,
-    alipay_public_cert_content: String,
     alipay_cert_sn: String,
     encrypt_key: String,
     ws_service_url: String,
@@ -147,16 +164,9 @@ impl AlipaySdkBuilder {
             gateway: Default::default(),
             timeout: Default::default(),
             camelcase: Default::default(),
-            version: Default::default(),
             key_type: Default::default(),
-            app_cert_path: Default::default(),
-            app_cert_content: Default::default(),
             app_cert_sn: Default::default(),
-            alipay_root_cert_path: Default::default(),
-            alipay_root_cert_content: Default::default(),
             alipay_root_cert_sn: Default::default(),
-            alipay_public_cert_path: Default::default(),
-            alipay_public_cert_content: Default::default(),
             alipay_cert_sn: Default::default(),
             encrypt_key: Default::default(),
             ws_service_url: Default::default(),
@@ -315,7 +325,7 @@ impl AlipaySdkBuilder {
             key_type: self.key_type,
             app_cert_sn: self.app_cert_sn,
             alipay_root_cert_sn: self.alipay_root_cert_sn,
-            alipay_cert_sn: self.alipay_cert_sn,
+            // alipay_cert_sn: self.alipay_cert_sn,
             encrypt_key: self.encrypt_key,
             ws_service_url: self.ws_service_url,
         };
@@ -441,7 +451,7 @@ impl AlipaySDK {
     }
 
     /// 生成网站接口请求链接或表单
-    pub fn page_exec(method: String, params: ParamsMap) {
+    pub fn page_exec(&self, method: String, params: ParamsMap) -> AlipayResult<String> {
         let mut form_data = AlipayForm::new();
         for (k, v) in params.iter() {
             if k == "method" {
@@ -450,6 +460,8 @@ impl AlipaySDK {
                 form_data.add_field(k.clone(), v.clone());
             }
         }
+
+        self._page_exec(method, form_data)
     }
 
     /// page 类接口，兼容原来的 formData 格式
@@ -513,7 +525,6 @@ impl AlipaySDK {
         sign_args: &ParamsMap,
         sign_str: &str,
         sign_type: &SignType,
-        raw: bool,
     ) -> AlipayResult<()> {
         let mut keys = sign_args.keys().collect::<Vec<&String>>();
         keys.sort();
@@ -523,15 +534,16 @@ impl AlipaySDK {
         for key in keys.iter() {
             let value = &sign_args[&key.to_string()];
 
-            // 如果 value 中包含了诸如 % 字符，decodeURIComponent 会报错
-            // 而且 notify 消息大部分都是 post 请求，无需进行 decodeURIComponent 操作
-            let v = if raw {
-                value_to_string(value)
-            } else {
-                decode(&value_to_string(value))?.into_owned()
-            };
+            // js 中如果 value 中包含了诸如 % 字符，decodeURIComponent 会报错
+            // 而且 notify 消息大部分都是 post 请求，无需进行 decodeURIComponent 操作，
+            // rust 中无此问题，故不需要传入 raw 参数
+            let v = decode(&value_to_string(value))?.into_owned();
 
-            queries.push(format!("{}={}", key, v));
+            let query = format!("{}={}", key, v);
+
+            trace!("query: {}", query);
+
+            queries.push(query);
         }
 
         debug!("queries: {:?}", queries);
@@ -542,6 +554,7 @@ impl AlipaySDK {
             sign_content.as_bytes(),
             alipay_public_key,
             &base64_decode(sign_str)?,
+            sign_type.signature(),
         )
     }
 
@@ -581,7 +594,7 @@ impl AlipaySDK {
         validate_str.to_owned()
     }
 
-    pub fn exec(&self, method: String, params: ExecParams) -> AlipayResult<AlipaySdkResult> {
+    pub fn exec(&self, method: String, params: ExecArgs) -> AlipayResult<AlipaySdkResult> {
         if let Some(form) = params.form_data {
             if form.get_files().len() > 0 {
                 let res = self.multipart_exec(method, form.get_files(), form.get_fields())?;
@@ -613,8 +626,6 @@ impl AlipaySDK {
             )));
         }
 
-        // let response_text = &resp.into_string()?;
-
         // 示例响应格式
         // {"alipay_trade_precreate_response":
         //  {"code": "10000","msg": "Success","out_trade_no": "111111","qr_code": "https:\/\/"},
@@ -625,6 +636,7 @@ impl AlipaySDK {
         //  {"code":"40002","msg":"Invalid Arguments","sub_code":"isv.code-invalid","sub_msg":"授权码code无效"},
         // }
         let json = resp.into_json::<Value>()?;
+
         let result = if let Some(r) = json.as_object() {
             r
         } else {
@@ -702,7 +714,12 @@ impl AlipaySDK {
                 let server_sign = base64_decode(&value_to_string(server_sign_base64))?;
 
                 // 参数存在，并且是正常的结果（不包含 sub_code）时才验签
-                match verify_with_rsa(validate_str.as_bytes(), &alipay_public_key, &server_sign) {
+                match verify_with_rsa(
+                    validate_str.as_bytes(),
+                    &alipay_public_key,
+                    &server_sign,
+                    self.config.sign_type.signature(),
+                ) {
                     Ok(()) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -710,7 +727,7 @@ impl AlipaySDK {
         }
     }
 
-    fn check_notify_sign(&self, post_data: &ParamsMap, raw: bool) -> bool {
+    pub fn check_notify_sign(&self, post_data: &ParamsMap) -> bool {
         match &self.config.alipay_public_key {
             None => false, // 未设置“支付宝公钥”或签名字符串不存，验签不通过
             Some(alipay_public_key) => {
@@ -751,13 +768,8 @@ impl AlipaySDK {
                 let sign_type = SignType::from_str(&value_to_string(&sign_type));
 
                 // 保留 sign_type 验证一次签名
-                let verify_result = self.notify_rsa_check(
-                    &alipay_public_key,
-                    &sign_args,
-                    &sign_str,
-                    &sign_type,
-                    raw,
-                );
+                let verify_result =
+                    self.notify_rsa_check(&alipay_public_key, &sign_args, &sign_str, &sign_type);
 
                 if verify_result.is_ok() {
                     return true;
@@ -767,13 +779,7 @@ impl AlipaySDK {
                 // 因为“历史原因”需要用户自己判断是否需要保留 sign_type 验证签名
                 // 这里是把其他 sdk 中的 rsaCheckV1、rsaCheckV2 做了合并
                 sign_args.remove("sign_type");
-                match self.notify_rsa_check(
-                    &alipay_public_key,
-                    &sign_args,
-                    &sign_str,
-                    &sign_type,
-                    raw,
-                ) {
+                match self.notify_rsa_check(&alipay_public_key, &sign_args, &sign_str, &sign_type) {
                     Ok(()) => true,
                     Err(_) => false,
                 }
@@ -782,16 +788,28 @@ impl AlipaySDK {
     }
 }
 
-pub struct ExecParams {
+#[derive(Default)]
+pub struct ExecArgs {
     form_data: Option<AlipayForm>,
     params: ParamsMap,
     need_encrypt: bool,
     validate_sign: bool,
 }
 
+impl ExecArgs {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn with_params(mut self, params: ParamsMap) -> Self {
+        self.params = params;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::fs;
 
     use serde_json::json;
 
@@ -879,18 +897,18 @@ mod tests {
         );
     }
 
-    fn new_sdk() -> AlipaySDK {
-        let sdk = AlipaySdkBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
-            .with_gateway(GATE_WAY.to_string())
-            .with_sign_type(super::SignType::RSA2)
-            .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
-            .with_timeout(Duration::from_millis(10000))
-            .with_encrypt_key("aYA0GP8JEW+D7/UFaskCWA==".to_string())
-            .enable_camelcase()
-            .build();
-
-        sdk
-    }
+    // fn new_sdk() -> AlipaySDK {
+    //     let sdk = AlipaySdkBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+    //         .with_gateway(GATE_WAY.to_string())
+    //         .with_sign_type(super::SignType::RSA2)
+    //         .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+    //         .with_timeout(Duration::from_millis(10000))
+    //         .with_encrypt_key("aYA0GP8JEW+D7/UFaskCWA==".to_string())
+    //         .enable_camelcase()
+    //         .build();
+    //
+    //     sdk
+    // }
 
     // #[test]
     // fn test_camelcase() {
@@ -1009,7 +1027,7 @@ mod tests {
         let mut sdk = new_check_notify_sign_sdk();
         sdk.config.alipay_public_key = None;
 
-        let result = sdk.check_notify_sign(json!({}).as_object().unwrap(), false);
+        let result = sdk.check_notify_sign(json!({}).as_object().unwrap());
 
         assert_eq!(result, false);
     }
@@ -1018,22 +1036,92 @@ mod tests {
     fn test_check_notify_sign_sign_is_null() {
         let sdk = new_check_notify_sign_sdk();
 
-        let result = sdk.check_notify_sign(json!({}).as_object().unwrap(), false);
+        let result = sdk.check_notify_sign(json!({}).as_object().unwrap());
 
         assert_eq!(result, false);
     }
 
     #[test]
-    fn test_check_notify_sign_should_delete_sign_type() {
+    fn test_check_notify_sign_with_sign_type() {
+        let sdk = new_check_notify_sign_sdk_should_delete_sign_type();
+
+        let post_data = json!({"gmt_create":"2019-08-15 15:56:22","charset":"utf-8","seller_email":"z97-yuquerevenue@service.aliyun.com","subject":"语雀空间 500人规模","sign":"QfTb8tqE1BMhS5qAnXtvsF3/jBkEvu9q9en0pdbBUDDjvKycZhQb7h8GDs4FKfi049PynaNuatxSgLb/nLWZpXyyh0LEWdK2S6Ri7nPwrVgOs08zugLO20vOQz44y3ti2Ncm8/wZts1Fr2gZ7pShnVX3d1B50hbsXnObT1r/U8ONNQjWXd0HIul4TG+Q3fm3svmSvFEy0WnzuhcyHPX5Gm4ELNctL6Qd5YniGJFNcc7kopHYtI/XD9YCKCH6Ct02rzUs9i11C9CsadtZn+WhxF26Dqt9sGEFajkJ8cxUTLi8+VCpLHsgPE8P0y095uQcDdK0YjCh4x7wVSov+lrmOQ==","buyer_id":"2088102534368455","invoice_amount":"0.10","notify_id":"2019081500222155624068450559358070","fund_bill_list":[{"amount":"0.10","fundChannel":"ALIPAYACCOUNT"}],"notify_type":"trade_status_sync","trade_status":"TRADE_SUCCESS","receipt_amount":"0.10","buyer_pay_amount":"0.10","sign_type":"RSA2","app_id":"2019073166072302","seller_id":"2088531891668739","gmt_payment":"2019-08-15 15:56:24","notify_time":"2019-08-15 15:56:25","version":"1.0","out_trade_no":"20190815155618536-564-57","total_amount":"0.10","trade_no":"2019081522001468450512505578","auth_app_id":"2019073166072302","buyer_logon_id":"xud***@126.com","point_amount":"0.00"});
+
+        let result = sdk.check_notify_sign(post_data.as_object().unwrap());
+
+        assert_eq!(result, true);
+    }
+
+    fn new_check_notify_sign_sdk_should_delete_sign_type() -> AlipaySDK {
         let notify_alipay_public_key_v1 = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqObrdC7hrgAVM98tK0nv3hSQRGGKT4lBsQjHiGjeYZjOPIPHR5knm2jnnz/YGIXIofVHkA/tAlBAd5DrY7YpvI4tP5EONLtZKC2ghBMx7McI2wRD0xiqzxOQr1FuhZGJ8/AUokBzJrzY+aGX2xcOrxFYRlFilvVLTXg4LWjR1tdPkO6+i7wQZAIVMClPkwVRZEbaERRHlKqTzv2gGv5rDU8gRoe1LeaN+6BlbTqHWkQcNCUNrA8C6l17XAXGKDsm/9TFWwO8EPHHHCaQdjtV5/FdcWIt+L8SR1ss7EXTjYDFtxcKVv9rEoY1lX8T4mX+GbXfZHraG5NCF1+XioL5JwIDAQAB";
 
         let mut sdk = new_check_notify_sign_sdk();
         sdk.set_alipay_public_key(notify_alipay_public_key_v1.to_string());
 
-        let post_data = json!({"gmt_create":"2019-08-15 15:56:22","charset":"utf-8","seller_email":"z97-yuquerevenue@service.aliyun.com","subject":"语雀空间 500人规模","sign":"QfTb8tqE1BMhS5qAnXtvsF3/jBkEvu9q9en0pdbBUDDjvKycZhQb7h8GDs4FKfi049PynaNuatxSgLb/nLWZpXyyh0LEWdK2S6Ri7nPwrVgOs08zugLO20vOQz44y3ti2Ncm8/wZts1Fr2gZ7pShnVX3d1B50hbsXnObT1r/U8ONNQjWXd0HIul4TG+Q3fm3svmSvFEy0WnzuhcyHPX5Gm4ELNctL6Qd5YniGJFNcc7kopHYtI/XD9YCKCH6Ct02rzUs9i11C9CsadtZn+WhxF26Dqt9sGEFajkJ8cxUTLi8+VCpLHsgPE8P0y095uQcDdK0YjCh4x7wVSov+lrmOQ==","buyer_id":"2088102534368455","invoice_amount":"0.10","notify_id":"2019081500222155624068450559358070","fund_bill_list":[{"amount":"0.10","fundChannel":"ALIPAYACCOUNT"}],"notify_type":"trade_status_sync","trade_status":"TRADE_SUCCESS","receipt_amount":"0.10","buyer_pay_amount":"0.10","sign_type":"RSA2","app_id":"2019073166072302","seller_id":"2088531891668739","gmt_payment":"2019-08-15 15:56:24","notify_time":"2019-08-15 15:56:25","version":"1.0","out_trade_no":"20190815155618536-564-57","total_amount":"0.10","trade_no":"2019081522001468450512505578","auth_app_id":"2019073166072302","buyer_logon_id":"xud***@126.com","point_amount":"0.00"});
+        sdk
+    }
 
-        let result = sdk.check_notify_sign(post_data.as_object().unwrap(), false);
+    #[test]
+    fn test_check_notify_sign_without_sign_type() {
+        let sdk = new_check_notify_sign_sdk_should_delete_sign_type();
+
+        let post_data = json!({"gmt_create":"2019-08-15 15:56:22","charset":"utf-8","seller_email":"z97-yuquerevenue@service.aliyun.com","subject":"语雀空间 500人规模","sign":"QfTb8tqE1BMhS5qAnXtvsF3/jBkEvu9q9en0pdbBUDDjvKycZhQb7h8GDs4FKfi049PynaNuatxSgLb/nLWZpXyyh0LEWdK2S6Ri7nPwrVgOs08zugLO20vOQz44y3ti2Ncm8/wZts1Fr2gZ7pShnVX3d1B50hbsXnObT1r/U8ONNQjWXd0HIul4TG+Q3fm3svmSvFEy0WnzuhcyHPX5Gm4ELNctL6Qd5YniGJFNcc7kopHYtI/XD9YCKCH6Ct02rzUs9i11C9CsadtZn+WhxF26Dqt9sGEFajkJ8cxUTLi8+VCpLHsgPE8P0y095uQcDdK0YjCh4x7wVSov+lrmOQ==","buyer_id":"2088102534368455","invoice_amount":"0.10","notify_id":"2019081500222155624068450559358070","fund_bill_list":[{"amount":"0.10","fundChannel":"ALIPAYACCOUNT"}],"notify_type":"trade_status_sync","trade_status":"TRADE_SUCCESS","receipt_amount":"0.10","buyer_pay_amount":"0.10","app_id":"2019073166072302","seller_id":"2088531891668739","gmt_payment":"2019-08-15 15:56:24","notify_time":"2019-08-15 15:56:25","version":"1.0","out_trade_no":"20190815155618536-564-57","total_amount":"0.10","trade_no":"2019081522001468450512505578","auth_app_id":"2019073166072302","buyer_logon_id":"xud***@126.com","point_amount":"0.00"});
+
+        let result = sdk.check_notify_sign(post_data.as_object().unwrap());
 
         assert_eq!(result, true);
+
+        // let post_data = json!({"app_id":"2017122801303261","charset":"UTF-8","commodity_order_id":"2019030800000018079639","contactor":"技术支持测试的公司","merchant_pid":"2088721996721370","method":"alipay.open.servicemarket.order.notify","name":"技术支持测试的公司","notify_id":"2019030800222102023008121054923345","notify_time":"2019-03-08 10:20:23","notify_type":"servicemarket_order_notify","order_item_num":"1","order_ticket":"29b1c37d99ab48c5bd5bdaeaeaefbB37","order_time":"2019-03-08 10:20:08","phone":"17826894615","service_code":"58621634","sign":"MsK5SCw8oqLw4f0hiNSd5OVGXxBY3wnQeT8vn5PklJSZFWSZbK4hQbNvkp4ZezeXQH514cEv0ul6Qow8yh6e6yM06LfEL+EZjcpZ0nxzFGRNQ5qq2AUc1OaXQdk92AGvxh+Iq4NGpPQFBd4D8EBJa3NJd8+czMfQskceosOQFqUtLQMYa5DPs+VpN7VM5BdXjaVIuKn5d9Wm2B9dI9ObIM+YRySDkZZPv14DVmUvcrcqJfOR8aHvtSd7B4l92wUQPQgQKNcOQho7xOHS/Bk+Y74AZL2y7TkNmdDoq9OGsThuF5tDW9rI9nVwXxOtsuB+bstra+W7aw9x9DvkKgdSRw==","sign_type":"RSA2","timestamp":"2019-03-08 10:20:23","title":"麦禾商城模版","total_price":"0.00","version":"1.0"});
+        //
+        // let result = sdk.check_notify_sign(post_data.as_object().unwrap());
+        //
+        // assert_eq!(result, true);
     }
+
+    #[test]
+    fn test_check_notify_sign_verify_fail() {
+        let sdk = new_check_notify_sign_sdk_should_delete_sign_type();
+
+        let post_data = json!({"app_id":"2018121762595097","auth_app_id":"2false8121762595097","buyer_id":"2088512613526436","buyer_logon_id":"152****6706","buyer_pay_amount":"0.01","charset":"utf-8","fund_bill_list":[{"amount":"0.01","fundChannel":"PCREDIT"}],"gmt_create":"2019-05-23 14:13:56","gmt_payment":"2019-05-23 14:17:13","invoice_amount":"0.01","notify_id":"2019052300222141714026431019971405","notify_time":"2019-05-23 14:17:14","notify_type":"trade_status_sync","out_trade_no":"tpxy23962362669658","point_amount":"0.00","receipt_amount":"0.01","seller_email":"myapp@alitest.com","seller_id":"2088331578818800","sign":"T946S2qyNFAXLhAaRgNMmatxH6SO3MyWYFnTamQOgW1iAcheL/Zz+VoizwvEc6mTEwYewvvKS1wNkMQ1oEajMUHv9+cXQ9IFvU/qKS9Ktvw5xHvCaK0fj7LsVcQ7VxfyT3kSvXUDfKDP4cHSPuSZKwM2ybkzr53bIH9OUTpTQd2d3J0rbdf76OoUt+XF9vwqj7OVE7AGjH2HPWp842DgL/YVy4qeA9N2uFKRevT3YUskjaRxuI/E66reNjTMFhbjEqGLKvMcDD4BaQXnibq9ojAj60589fBwzKk3yWsVQmqGfksMQoheVMtZ3lAw4o2ty3TFngbVFFLwgx8FDpBZ9Q==","sign_type":"RSA2","subject":"tpxy2222896485","total_amount":"0.01","trade_no":"111111112019052322001426431037869358","trade_status":"TRADE_SUCCESS","version":"1.0"});
+
+        let result = sdk.check_notify_sign(post_data.as_object().unwrap());
+
+        assert_eq!(result, false);
+    }
+
+    // fn new_pkcs8_sdk() -> AlipaySDK {
+    //     let pkcs8_private_key =
+    //         String::from_utf8(fs::read("examples/fixtures/app-private-key-pkcs8.pem").unwrap())
+    //             .unwrap();
+    //     let sdk = AlipaySdkBuilder::new(APP_ID.to_string(), pkcs8_private_key)
+    //         .with_gateway(GATE_WAY.to_string())
+    //         .with_sign_type(super::SignType::RSA2)
+    //         .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+    //         .with_timeout(Duration::from_millis(10000))
+    //         .with_key_type(super::KeyType::PKCS8)
+    //         .enable_camelcase()
+    //         .build();
+    //
+    //     sdk
+    // }
+
+    // #[test]
+    // fn test_pkcs8_with_validate_sign_is_true() {
+    //     let sdk = new_pkcs8_sdk();
+    //
+    //     let result = sdk
+    //         .exec(
+    //             "alipay.offline.market.shop.category.query".to_string(),
+    //             ExecArgs::new().with_params(json!({"bizContent":{}}).as_object().unwrap().clone()),
+    //         )
+    //         .unwrap();
+    //
+    //     match result {
+    //         AlipaySdkResult::Common(cr) => {
+    //             debug!("response: {:?}", cr);
+    //             assert_eq!(cr.code, "10000");
+    //         }
+    //         _ => {}
+    //     }
+    // }
 }

@@ -3,14 +3,14 @@ use std::convert::TryInto;
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64ct::{Base64, Encoding};
 use convert_case::{Case, Casing};
-use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::sha2::{Digest, Sha256};
-use rsa::{Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey};
+use rsa::{Pkcs1v15Sign, RsaPublicKey};
 use serde_json::Value;
 use urlencoding::encode;
 use x509_parser::nom::AsBytes;
 
+use crate::alipay::KeyType;
 use crate::{
     alipay::AlipaySdkConfig,
     error::{AlipayResult, Error},
@@ -184,11 +184,7 @@ pub fn sign(
         .map(|k| {
             let data = &decamelize_params[k.to_owned()];
 
-            let v = if data.is_string() {
-                data.as_str().unwrap().to_string()
-            } else {
-                data.to_string()
-            };
+            let v = value_to_string(data);
             trace!("key={} value={}({})", k, v, v.len());
 
             format!("{}={}", k, encode(&v))
@@ -197,19 +193,17 @@ pub fn sign(
         .join("&");
     debug!("sign str: {}", sign_str);
 
-    let sign = sign_with_rsa(&config.private_key, &sign_str)?;
+    let sign = sign_with_rsa(
+        &config.key_type,
+        &config.private_key,
+        &sign_str,
+        config.sign_type.signature(),
+    )?;
     debug!("sign: {:?}", sign);
 
     decamelize_params.insert("sign".to_owned(), serde_json::json!(base64_encode(&sign)));
 
     Ok(decamelize_params)
-}
-
-fn deserialize_rsa_private_key(private_key: &str) -> AlipayResult<RsaPrivateKey> {
-    RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|e| {
-        error!("反序列化私钥出错: {}", e);
-        Error::Sign(e.to_string())
-    })
 }
 
 fn deserialize_rsa_public_key(public_key: &str) -> AlipayResult<RsaPublicKey> {
@@ -219,13 +213,17 @@ fn deserialize_rsa_public_key(public_key: &str) -> AlipayResult<RsaPublicKey> {
     })
 }
 
-pub fn sign_with_rsa(private_key: &str, sign_str: &str) -> AlipayResult<Vec<u8>> {
-    let private_key = deserialize_rsa_private_key(private_key)?;
+pub fn sign_with_rsa(
+    key_type: &KeyType,
+    private_key: &str,
+    sign_str: &str,
+    signature: Pkcs1v15Sign,
+) -> AlipayResult<Vec<u8>> {
+    let private_key = key_type.deserialize_rsa_private_key(private_key)?;
     let digest = Sha256::digest(sign_str.as_bytes());
 
-    let padding = Pkcs1v15Sign::new::<Sha256>();
     let signature = private_key
-        .sign(padding, &digest)
+        .sign(signature, &digest)
         .map_err(|e| Error::Sign(e.to_string()))?;
 
     Ok(signature)
@@ -234,15 +232,19 @@ pub fn sign_with_rsa(private_key: &str, sign_str: &str) -> AlipayResult<Vec<u8>>
 /// 验签。
 ///
 /// 需要注意，sign 应该是 base64 decode 后的数据，不要直接将 base64str.as_bytes() 作为 sign 传入
-pub fn verify_with_rsa(data: &[u8], public_key: &str, sign: &[u8]) -> AlipayResult<()> {
+pub fn verify_with_rsa(
+    data: &[u8],
+    public_key: &str,
+    sign: &[u8],
+    signature: Pkcs1v15Sign,
+) -> AlipayResult<()> {
     // TODO: 根据 sign type 使用不同的 digital, 默认使用 Pkcs1v15Sign
     let public_key = deserialize_rsa_public_key(public_key)?;
 
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
 
-    let padding = Pkcs1v15Sign::new::<Sha256>();
-    match public_key.verify(padding, &hasher.finalize(), sign) {
+    match public_key.verify(signature, &hasher.finalize(), sign) {
         Ok(()) => Ok(()),
         Err(e) => {
             error!("验签错误: {}", e);
