@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 pub struct IFile {
-    name: String,
-    path: String,
+    pub(crate) name: String,
+    pub(crate) path: String,
     field_name: String,
 }
 

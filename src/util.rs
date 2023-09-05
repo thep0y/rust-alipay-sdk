@@ -41,7 +41,7 @@ pub fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn keys_to_snake_case(data: &ParamsMap) -> ParamsMap {
+pub(crate) fn keys_to_snake_case(data: &ParamsMap) -> ParamsMap {
     let mut new_data = serde_json::Map::<String, Value>::with_capacity(data.len());
     for (k, v) in data.iter() {
         let new_key = k.to_case(Case::Snake);
@@ -98,13 +98,9 @@ pub fn aes_decrypt(data: &str, aes_key: &str) -> AlipayResult<Value> {
     Ok(serde_json::from_slice(bytes).unwrap())
 }
 
-pub fn sign(
-    method: String,
-    params: ParamsMap,
-    config: &AlipaySdkConfig,
-) -> AlipayResult<ParamsMap> {
+pub fn sign(method: &str, params: ParamsMap, config: &AlipaySdkConfig) -> AlipayResult<ParamsMap> {
     let mut sign_params = ParamsMap::new();
-    sign_params.insert("method".to_owned(), Value::String(method.clone()));
+    sign_params.insert("method".to_owned(), Value::String(method.to_string()));
     sign_params.insert("appId".to_owned(), Value::String(config.app_id.clone()));
     sign_params.insert("charset".to_owned(), Value::String(config.charset.clone()));
     sign_params.insert("version".to_owned(), Value::String(config.version.clone()));
@@ -281,7 +277,7 @@ mod tests {
         debug!("alipay sdk config: {:?}", sdk.config);
 
         let data = sign(
-            "alipay.security.risk.content.analyze".to_owned(),
+            "alipay.security.risk.content.analyze",
             serde_json::json!({ "publicArgs": 1, "bizContent": { "a_b": 1, "aBc": "Ab" } })
                 .as_object()
                 .unwrap()
@@ -300,7 +296,7 @@ mod tests {
         assert_ne!(data["sign"], "");
 
         let data2 = sign(
-            "alipay.security.risk.content.analyze".to_owned(),
+            "alipay.security.risk.content.analyze",
             serde_json::json!({ "publicArgs": 1, "biz_content": { "a_b": 1, "aBc": "Ab" } })
                 .as_object()
                 .unwrap()

@@ -17,6 +17,7 @@ cbc = "0.1"
 convert_case = "0.6.0"
 log = "0.4"
 md5 = "0.7"
+multipart = "0.18.0"
 rand = "0.8"
 rsa = { version = "0.9", features = ["sha1", "sha2",  "pem"] }
 serde = { version = "1", features = ["derive"] }

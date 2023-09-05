@@ -3,10 +3,12 @@ use std::{
     time::{self, Duration},
 };
 
+use convert_case::{Case, Casing};
+use multipart::client::lazy::Multipart;
 use rsa::{
     pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, sha2::Sha256, Pkcs1v15Sign, RsaPrivateKey,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha1::Sha1;
 use urlencoding::{decode, encode};
 
@@ -412,33 +414,73 @@ impl AlipaySDK {
         method: String,
         files: &[IFile],
         fields: &[IField],
+        validate_sign: bool,
     ) -> AlipayResult<AlipaySdkCommonResult> {
-        // let sign_params = HashMap::<&str, &str>::new();
-        // let form_data = HashMap::<&str, &str>::new();
-        //
-        // form.iter().map(|(k, v)| {
-        //     let val = v.to_string();
-        //     sign_params.insert(&k.to_case(Case::Camel), &val);
-        //     form_data.insert(&k.to_case(Case::Snake), &val);
-        // });
-        //
-        // let (_, url) = Self::format_url(self.config.gateway, sign_params);
-        //
-        // let mut req = ureq::post(url.as_str())
-        //     .timeout(self.config.timeout)
-        //     .set("user-agent", &self.sdk_version);
+        let mut sign_params = ParamsMap::new();
+        let mut form = Multipart::new();
 
-        Ok(AlipaySdkCommonResult {
-            code: "".to_owned(),
-            msg: "".to_owned(),
-            sub_code: None,
-            sub_msg: None,
-        })
+        for field in fields.iter() {
+            // formData 的字段类型应为 string。（兼容 null）
+            let v = value_to_string(&field.value);
+            // 字段加入签名参数（文件不需要签名）
+            sign_params.insert(field.name.clone(), json!(&v));
+            form.add_text(field.name.to_case(Case::Snake), v);
+        }
+
+        // 签名方法中使用的 key 是驼峰
+        let sign_params = keys_to_camel_case(&sign_params);
+
+        for file in files.iter() {
+            // 文件名需要转换驼峰为下划线
+            let file_key = file.name.to_case(Case::Snake);
+            // 处理文件类型
+            form.add_file(file_key, file.path.clone());
+        }
+
+        let form_data = form.prepare().unwrap();
+
+        let sign_data = sign(&method, sign_params, &self.config)?;
+
+        let (_, url) = Self::format_url(&self.config.gateway, sign_data);
+
+        let response = ureq::post(url.as_str())
+            .timeout(self.config.timeout)
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={}", form_data.boundary()),
+            )
+            .set("user-agent", &self.sdk_version)
+            .send(form_data)?;
+
+        let body = response.into_json::<Value>()?;
+
+        let response_key = format!("{}_response", method.replace(".", "_"));
+
+        // 开放平台返回错误时，`${responseKey}` 对应的值不存在
+        match body.get(&response_key) {
+            Some(data) => {
+                // 验签
+                let validate_success = if validate_sign {
+                    self.check_response_sign(&value_to_string(data), &response_key)?
+                } else {
+                    true
+                };
+
+                if validate_success {
+                    return Ok(serde_json::from_value(data.clone())?);
+                }
+
+                error!("验签失败: {}", body);
+
+                Err(Error::Sign("[AlipaySdk]验签失败".to_string()))
+            }
+            None => Err(Error::Sign("[AlipaySdk]HTTP 请求错误".to_string())),
+        }
     }
 
     /// 生成请求字符串，用于客户端进行调用
     pub fn sdk_exec(&self, method: String, params: ParamsMap) -> AlipayResult<String> {
-        let data = sign(method, params, &self.config)?;
+        let data = sign(&method, params, &self.config)?;
         trace!("sdk request data: {:?}", data);
 
         let sdk_str = data
@@ -479,7 +521,7 @@ impl AlipaySDK {
         // 签名方法中使用的 key 是驼峰
         let sign_params = keys_to_camel_case(&sign_params);
 
-        let sign_data = sign(method, sign_params, &self.config)?;
+        let sign_data = sign(&method, sign_params, &self.config)?;
 
         let (exec_params, url) = Self::format_url(&self.config.gateway, sign_data);
 
@@ -597,7 +639,12 @@ impl AlipaySDK {
     pub fn exec(&self, method: String, params: ExecArgs) -> AlipayResult<AlipaySdkResult> {
         if let Some(form) = params.form_data {
             if form.get_files().len() > 0 {
-                let res = self.multipart_exec(method, form.get_files(), form.get_fields())?;
+                let res = self.multipart_exec(
+                    method,
+                    form.get_files(),
+                    form.get_fields(),
+                    params.validate_sign,
+                )?;
 
                 return Ok(AlipaySdkResult::Common(res));
             }
@@ -608,7 +655,7 @@ impl AlipaySDK {
         }
 
         // 计算签名
-        let sign_data = sign(method.clone(), params.params, &self.config)?;
+        let sign_data = sign(&method, params.params, &self.config)?;
         let (exec_params, url) = Self::format_url(&self.config.gateway, sign_data);
 
         trace!("exec_params: {:?}", exec_params);
