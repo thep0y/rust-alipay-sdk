@@ -111,10 +111,19 @@ fn get_root_cert_sn(root_content: impl AsRef<[u8]>) -> AlipayResult<String> {
 mod tests {
     use crate::error::AlipayResult;
 
-    use super::{load_public_key, load_public_key_from_path};
+    use super::{get_sn, get_sn_from_path, load_public_key, load_public_key_from_path};
 
     const ALIPAY_PUBLIC_CERT_PATH: &str = "examples/fixtures/alipayCertPublicKey_RSA2.crt";
     const PUBLIC_KEY_VAL: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhoVesfcGvUv1XvUndmX0rmSZ/2posJBCooySbSVFpV79RtHMzrVz2aKkC3WvOXeT5iNeQK4mK8gp3vNkWrHTkQGx5BcmkeO1WS384CQde7dAS0gmxeFs5bs+cCQqV2A2c2R9/5rJMtFtp1Ot/rIiMBUn6Ei0UoztM7AneavqQEzSwYlCKNhPFFtHCiz7u4O5R9CIyvUmYr+zpem2HXBN9ygPAZ0aXBQipGbc45+G07ZCNsmY4hV/Igya1aBf+Ye8p10Ew8uBBri0sIknhSC2LqKKy2IH1fO6q1d1jhN240QRHvbpRNv60kAfZsEulBASBrCMBi49NiJyr5nre7SNywIDAQAB";
+
+    const APP_CERT_PATH: &str = "examples/fixtures/appCertPublicKey_2021001161683774.crt";
+    const APP_CERT_SN_VAL: &str = "866efef280dec9137a87d047ac446315";
+
+    const ALIPAY_PUBLIC_CERT_SN_VAL: &str = "7513daaaa48aa3ba2e4018d84402479c";
+
+    const ROOT_CERT_PATH: &str = "examples/fixtures/alipayRootCert.crt";
+    const ROOT_CERT_SN_VAL: &str =
+        "687b59193f3f462dd5336e5abf83c5d8_02941eef3187dddf3d3b83462e1dfcf6";
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -139,6 +148,28 @@ mod tests {
 
         assert_eq!(public_key, PUBLIC_KEY_VAL);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_sn_from_path() -> AlipayResult<()> {
+        let app_cert_sn = get_sn_from_path(APP_CERT_PATH, false)?;
+        assert_eq!(app_cert_sn, APP_CERT_SN_VAL);
+
+        let alipay_public_cert_sn = get_sn_from_path(ALIPAY_PUBLIC_CERT_PATH, false)?;
+        assert_eq!(alipay_public_cert_sn, ALIPAY_PUBLIC_CERT_SN_VAL);
+
+        let root_cert_sn = get_sn_from_path(ROOT_CERT_PATH, true)?;
+        assert_eq!(root_cert_sn, ROOT_CERT_SN_VAL);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_sn() -> AlipayResult<()> {
+        let cert = include_str!("../examples/fixtures/alipayCertPublicKey_RSA2.crt");
+        let alipay_public_cert_sn = get_sn(cert, false)?;
+        assert_eq!(alipay_public_cert_sn, ALIPAY_PUBLIC_CERT_SN_VAL);
         Ok(())
     }
 }
