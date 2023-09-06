@@ -1,4 +1,7 @@
 use serde_json::Value;
+use std::convert::Into;
+
+use crate::ParamsMap;
 
 pub struct IFile {
     pub(crate) path: String,
@@ -60,18 +63,25 @@ impl AlipayForm {
     }
 
     /// 增加字段
-    pub fn add_field(&mut self, field_name: String, field_value: Value) {
+    pub fn add_field<I: Into<String>>(&mut self, field_name: I, field_value: I) {
         self.fields.push(IField {
-            name: field_name,
-            value: field_value,
+            name: field_name.into(),
+            value: Value::String(field_value.into()),
+        })
+    }
+
+    pub fn add_object_field<I: Into<String>>(&mut self, field_name: I, value: &ParamsMap) {
+        self.fields.push(IField {
+            name: field_name.into(),
+            value: Value::Object(value.clone()),
         })
     }
 
     /// 增加文件
-    pub fn add_file(&mut self, field_name: String, file_path: String) {
+    pub fn add_file<S: Into<String>>(&mut self, field_name: S, file_path: S) {
         self.files.push(IFile {
-            path: file_path,
-            field_name,
+            path: file_path.into(),
+            field_name: field_name.into(),
         })
     }
 }

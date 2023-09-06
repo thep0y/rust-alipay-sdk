@@ -1,3 +1,4 @@
+use sha1::Sha1;
 use std::{
     path::Path,
     time::{self, Duration},
@@ -5,11 +6,9 @@ use std::{
 
 use convert_case::{Case, Casing};
 use multipart::client::lazy::Multipart;
-use rsa::{
-    pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, sha2::Sha256, Pkcs1v15Sign, RsaPrivateKey,
-};
+use rsa::sha2::{Digest, Sha256};
+use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, Pkcs1v15Sign, RsaPrivateKey};
 use serde_json::{json, Value};
-use sha1::Sha1;
 use urlencoding::{decode, encode};
 
 use crate::{
@@ -56,6 +55,28 @@ impl SignType {
         match s.to_uppercase().as_str() {
             "RSA" => Self::RSA,
             _ => Self::RSA2,
+        }
+    }
+
+    pub fn hash(&self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Self::RSA => {
+                let mut h = Sha1::new();
+                h.update(data);
+                h.finalize().to_vec()
+            }
+            _ => {
+                let mut h = Sha256::new();
+                h.update(data);
+                h.finalize().to_vec()
+            }
+        }
+    }
+
+    pub fn digest(&self, sign_str: &str) -> Vec<u8> {
+        match self {
+            SignType::RSA => Sha1::digest(sign_str.as_bytes()).to_vec(),
+            _ => Sha256::digest(sign_str.as_bytes()).to_vec(),
         }
     }
 
@@ -411,7 +432,7 @@ impl AlipaySDK {
     /// 文件上传
     fn multipart_exec(
         &self,
-        method: String,
+        method: &str,
         files: &[IFile],
         fields: &[IField],
         validate_sign: bool,
@@ -424,7 +445,9 @@ impl AlipaySDK {
             let v = value_to_string(&field.value);
             // 字段加入签名参数（文件不需要签名）
             sign_params.insert(field.name.clone(), json!(&v));
-            form.add_text(field.name.to_case(Case::Snake), v);
+            let field_name = field.name.to_case(Case::Snake);
+            trace!("field name: {}", field_name);
+            form.add_text(field_name, v);
         }
 
         // 签名方法中使用的 key 是驼峰
@@ -433,6 +456,7 @@ impl AlipaySDK {
         for file in files.iter() {
             // 文件名需要转换驼峰为下划线
             let file_key = file.field_name.to_case(Case::Snake);
+            trace!("file name: {}", file_key);
             // 处理文件类型
             form.add_file(file_key, file.path.clone());
         }
@@ -442,6 +466,8 @@ impl AlipaySDK {
         let sign_data = sign(&method, sign_params, &self.config)?;
 
         let (_, url) = Self::format_url(&self.config.gateway, sign_data);
+
+        debug!("url: {}", url);
 
         let response = ureq::post(url.as_str())
             .timeout(self.config.timeout)
@@ -454,17 +480,26 @@ impl AlipaySDK {
 
         let body = response.into_json::<Value>()?;
 
+        debug!("响应成功: {}", body);
+
         let response_key = format!("{}_response", method.replace(".", "_"));
 
         // 开放平台返回错误时，`${responseKey}` 对应的值不存在
         match body.get(&response_key) {
             Some(data) => {
+                // if data["code"] == Value::String("40002".to_string()) {
+                //     error!("请求出错：{}, {}", data["msg"], data["sub_msg"]);
+                //     return Err(Error::Sign("[AlipaySdk]HTTP 请求错误".to_string()));
+                // }
+
                 // 验签
                 let validate_success = if validate_sign {
-                    self.check_response_sign(&value_to_string(data), &response_key)?
+                    self.check_response_sign(&value_to_string(&body), &response_key)?
                 } else {
                     true
                 };
+
+                debug!("验签结果: {}", validate_success);
 
                 if validate_success {
                     return Ok(serde_json::from_value(data.clone())?);
@@ -493,13 +528,13 @@ impl AlipaySDK {
     }
 
     /// 生成网站接口请求链接或表单
-    pub fn page_exec(&self, method: String, params: ParamsMap) -> AlipayResult<String> {
+    pub fn page_exec(&self, method: &str, params: ParamsMap) -> AlipayResult<String> {
         let mut form_data = AlipayForm::new();
         for (k, v) in params.iter() {
             if k == "method" {
                 form_data.set_method(Method::from_string(&v.to_string()));
             } else {
-                form_data.add_field(k.clone(), v.clone());
+                form_data.add_field(k.clone(), v.to_string());
             }
         }
 
@@ -507,7 +542,7 @@ impl AlipaySDK {
     }
 
     /// page 类接口，兼容原来的 formData 格式
-    fn _page_exec(&self, method: String, form_data: AlipayForm) -> AlipayResult<String> {
+    fn _page_exec(&self, method: &str, form_data: AlipayForm) -> AlipayResult<String> {
         let mut sign_params = ParamsMap::with_capacity(form_data.get_fields().len() + 1);
         sign_params.insert(
             "alipaySdk".to_owned(),
@@ -567,7 +602,7 @@ impl AlipaySDK {
         sign_args: &ParamsMap,
         sign_str: &str,
         sign_type: &SignType,
-    ) -> AlipayResult<()> {
+    ) -> AlipayResult<bool> {
         let mut keys = sign_args.keys().collect::<Vec<&String>>();
         keys.sort();
 
@@ -596,20 +631,21 @@ impl AlipaySDK {
             sign_content.as_bytes(),
             alipay_public_key,
             &base64_decode(sign_str)?,
-            sign_type.signature(),
+            &sign_type,
         )
     }
 
     pub fn get_sign_str(origin_str: &str, response_key: &str) -> String {
+        trace!("origin str: {}", origin_str);
         // 待签名的字符串
         let mut validate_str = origin_str.trim();
         // 找到 xxx_response 开始的位置
-        let start_index = origin_str
+        let start_index = validate_str
             .find(&(response_key.to_owned() + "\""))
             .map(|idx| idx as i32)
             .unwrap_or_else(|| -1);
         // 找到最后一个 “"sign"” 字符串的位置（避免）
-        let last_index = origin_str
+        let last_index = validate_str
             .rfind("\"sign\"")
             .map(|idx| idx as i32)
             .unwrap_or_else(|| -1);
@@ -636,7 +672,7 @@ impl AlipaySDK {
         validate_str.to_owned()
     }
 
-    pub fn exec(&self, method: String, params: ExecArgs) -> AlipayResult<AlipaySdkResult> {
+    pub fn exec(&self, method: &str, params: ExecArgs) -> AlipayResult<AlipaySdkResult> {
         if let Some(form) = params.form_data {
             if form.get_files().len() > 0 {
                 let res = self.multipart_exec(
@@ -683,6 +719,7 @@ impl AlipaySDK {
         //  {"code":"40002","msg":"Invalid Arguments","sub_code":"isv.code-invalid","sub_msg":"授权码code无效"},
         // }
         let json = resp.into_json::<Value>()?;
+        debug!("响应成功: {}", json);
 
         let result = if let Some(r) = json.as_object() {
             r
@@ -703,6 +740,8 @@ impl AlipaySDK {
                 )))
             }
         };
+
+        debug!("response data: {}", data);
 
         if params.need_encrypt {
             let data_str = data.to_string();
@@ -761,35 +800,32 @@ impl AlipaySDK {
                 let server_sign = base64_decode(&value_to_string(server_sign_base64))?;
 
                 // 参数存在，并且是正常的结果（不包含 sub_code）时才验签
-                match verify_with_rsa(
+                verify_with_rsa(
                     validate_str.as_bytes(),
                     &alipay_public_key,
                     &server_sign,
-                    self.config.sign_type.signature(),
-                ) {
-                    Ok(()) => Ok(true),
-                    Err(_) => Ok(false),
-                }
+                    &self.config.sign_type,
+                )
             }
         }
     }
 
-    pub fn check_notify_sign(&self, post_data: &ParamsMap) -> bool {
+    pub fn check_notify_sign(&self, post_data: &ParamsMap) -> AlipayResult<bool> {
         match &self.config.alipay_public_key {
-            None => false, // 未设置“支付宝公钥”或签名字符串不存，验签不通过
+            None => Ok(false), // 未设置“支付宝公钥”或签名字符串不存，验签不通过
             Some(alipay_public_key) => {
                 // 未设置“支付宝公钥”或签名字符串不存，验签不通过
                 if alipay_public_key.is_empty() {
-                    return false;
+                    return Ok(false);
                 }
 
                 let sign_str = match post_data.get("sign") {
                     Some(s) => value_to_string(s),
-                    None => return false,
+                    None => return Ok(false),
                 };
                 // 未设置“支付宝公钥”或签名字符串不存，验签不通过
                 if sign_str.is_empty() {
-                    return false;
+                    return Ok(false);
                 }
 
                 trace!("sign str: {}", sign_str);
@@ -816,20 +852,17 @@ impl AlipaySDK {
 
                 // 保留 sign_type 验证一次签名
                 let verify_result =
-                    self.notify_rsa_check(&alipay_public_key, &sign_args, &sign_str, &sign_type);
+                    self.notify_rsa_check(&alipay_public_key, &sign_args, &sign_str, &sign_type)?;
 
-                if verify_result.is_ok() {
-                    return true;
+                if verify_result {
+                    return Ok(true);
                 }
 
                 // 删除 sign_type 验一次
                 // 因为“历史原因”需要用户自己判断是否需要保留 sign_type 验证签名
                 // 这里是把其他 sdk 中的 rsaCheckV1、rsaCheckV2 做了合并
                 sign_args.remove("sign_type");
-                match self.notify_rsa_check(&alipay_public_key, &sign_args, &sign_str, &sign_type) {
-                    Ok(()) => true,
-                    Err(_) => false,
-                }
+                self.notify_rsa_check(&alipay_public_key, &sign_args, &sign_str, &sign_type)
             }
         }
     }
@@ -848,24 +881,33 @@ impl ExecArgs {
         Default::default()
     }
 
-    pub fn with_params(mut self, params: ParamsMap) -> Self {
+    pub fn set_form(&mut self, form: AlipayForm) {
+        self.form_data = Some(form);
+    }
+
+    pub fn set_params(&mut self, params: ParamsMap) {
         self.params = params;
-        self
+    }
+
+    pub fn enable_validate_sign(&mut self) {
+        self.validate_sign = true;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{env, fs, time::Duration};
 
     use serde_json::json;
 
-    use super::{AlipaySDK, AlipaySdkBuilder};
+    use crate::{error::AlipayResult, form::AlipayForm};
+
+    use super::{AlipaySDK, AlipaySdkBuilder, AlipaySdkResult, ExecArgs};
 
     const PRIVATE_KEY: &str = include_str!("../examples/fixtures/app-private-key.pem");
     const ALIPAY_PUBLIC_KEY: &str = include_str!("../examples/fixtures/alipay-public-key.pem");
 
-    const APP_ID: &str = "9021000126650292";
+    const APP_ID: &str = "2021000122671080";
     const GATE_WAY: &str = "https://openapi-sandbox.dl.alipaydev.com/gateway.do";
 
     fn init() {
@@ -942,6 +984,47 @@ mod tests {
                 pkcs8_private_key,
             ))
         );
+    }
+
+    fn new_multipart_exec_sdk() -> AlipaySDK {
+        let sdk = AlipaySdkBuilder::new(APP_ID.to_string(), PRIVATE_KEY.to_string())
+            .with_gateway(GATE_WAY.to_string())
+            .with_sign_type(super::SignType::RSA2)
+            .with_alipay_public_key(ALIPAY_PUBLIC_KEY.to_string())
+            .with_timeout(Duration::from_millis(10000))
+            .enable_camelcase()
+            .build();
+
+        sdk
+    }
+
+    #[test]
+    fn test_multipart_exec_normal() {
+        // NOTICE: 这个测试用例是失败的，官方 node sdk 也一样失败。
+        //    - 状态码为 10000 时验签失败
+        //    - 状态码可能为 40002，此时验签通过，但与 assert_eq 条件不匹配，测试也会失败
+        let file_path = env::current_dir()
+            .unwrap()
+            .join("examples/fixtures/demo.jpg");
+
+        let mut form = AlipayForm::new();
+        form.add_field("biz_code", "openpt_appstore");
+        form.add_file("file_content", file_path.to_str().unwrap());
+
+        let sdk = new_multipart_exec_sdk();
+
+        let mut exec_args = ExecArgs::new();
+        exec_args.set_form(form);
+        exec_args.enable_validate_sign();
+
+        let result = sdk.exec("alipay.open.file.upload", exec_args).unwrap();
+        match result {
+            AlipaySdkResult::Common(cr) => {
+                debug!("{:?}", cr);
+                assert_eq!(cr.code, "10000");
+            }
+            _ => {}
+        }
     }
 
     // fn new_sdk() -> AlipaySDK {
@@ -1070,33 +1153,39 @@ mod tests {
     }
 
     #[test]
-    fn test_check_notify_sign_alipay_public_key_is_null() {
+    fn test_check_notify_sign_alipay_public_key_is_null() -> AlipayResult<()> {
         let mut sdk = new_check_notify_sign_sdk();
         sdk.config.alipay_public_key = None;
 
-        let result = sdk.check_notify_sign(json!({}).as_object().unwrap());
+        let result = sdk.check_notify_sign(json!({}).as_object().unwrap())?;
 
         assert_eq!(result, false);
+
+        Ok(())
     }
 
     #[test]
-    fn test_check_notify_sign_sign_is_null() {
+    fn test_check_notify_sign_sign_is_null() -> AlipayResult<()> {
         let sdk = new_check_notify_sign_sdk();
 
-        let result = sdk.check_notify_sign(json!({}).as_object().unwrap());
+        let result = sdk.check_notify_sign(json!({}).as_object().unwrap())?;
 
         assert_eq!(result, false);
+
+        Ok(())
     }
 
     #[test]
-    fn test_check_notify_sign_with_sign_type() {
+    fn test_check_notify_sign_with_sign_type() -> AlipayResult<()> {
         let sdk = new_check_notify_sign_sdk_should_delete_sign_type();
 
         let post_data = json!({"gmt_create":"2019-08-15 15:56:22","charset":"utf-8","seller_email":"z97-yuquerevenue@service.aliyun.com","subject":"语雀空间 500人规模","sign":"QfTb8tqE1BMhS5qAnXtvsF3/jBkEvu9q9en0pdbBUDDjvKycZhQb7h8GDs4FKfi049PynaNuatxSgLb/nLWZpXyyh0LEWdK2S6Ri7nPwrVgOs08zugLO20vOQz44y3ti2Ncm8/wZts1Fr2gZ7pShnVX3d1B50hbsXnObT1r/U8ONNQjWXd0HIul4TG+Q3fm3svmSvFEy0WnzuhcyHPX5Gm4ELNctL6Qd5YniGJFNcc7kopHYtI/XD9YCKCH6Ct02rzUs9i11C9CsadtZn+WhxF26Dqt9sGEFajkJ8cxUTLi8+VCpLHsgPE8P0y095uQcDdK0YjCh4x7wVSov+lrmOQ==","buyer_id":"2088102534368455","invoice_amount":"0.10","notify_id":"2019081500222155624068450559358070","fund_bill_list":[{"amount":"0.10","fundChannel":"ALIPAYACCOUNT"}],"notify_type":"trade_status_sync","trade_status":"TRADE_SUCCESS","receipt_amount":"0.10","buyer_pay_amount":"0.10","sign_type":"RSA2","app_id":"2019073166072302","seller_id":"2088531891668739","gmt_payment":"2019-08-15 15:56:24","notify_time":"2019-08-15 15:56:25","version":"1.0","out_trade_no":"20190815155618536-564-57","total_amount":"0.10","trade_no":"2019081522001468450512505578","auth_app_id":"2019073166072302","buyer_logon_id":"xud***@126.com","point_amount":"0.00"});
 
-        let result = sdk.check_notify_sign(post_data.as_object().unwrap());
+        let result = sdk.check_notify_sign(post_data.as_object().unwrap())?;
 
         assert_eq!(result, true);
+
+        Ok(())
     }
 
     fn new_check_notify_sign_sdk_should_delete_sign_type() -> AlipaySDK {
@@ -1109,12 +1198,12 @@ mod tests {
     }
 
     #[test]
-    fn test_check_notify_sign_without_sign_type() {
+    fn test_check_notify_sign_without_sign_type() -> AlipayResult<()> {
         let sdk = new_check_notify_sign_sdk_should_delete_sign_type();
 
         let post_data = json!({"gmt_create":"2019-08-15 15:56:22","charset":"utf-8","seller_email":"z97-yuquerevenue@service.aliyun.com","subject":"语雀空间 500人规模","sign":"QfTb8tqE1BMhS5qAnXtvsF3/jBkEvu9q9en0pdbBUDDjvKycZhQb7h8GDs4FKfi049PynaNuatxSgLb/nLWZpXyyh0LEWdK2S6Ri7nPwrVgOs08zugLO20vOQz44y3ti2Ncm8/wZts1Fr2gZ7pShnVX3d1B50hbsXnObT1r/U8ONNQjWXd0HIul4TG+Q3fm3svmSvFEy0WnzuhcyHPX5Gm4ELNctL6Qd5YniGJFNcc7kopHYtI/XD9YCKCH6Ct02rzUs9i11C9CsadtZn+WhxF26Dqt9sGEFajkJ8cxUTLi8+VCpLHsgPE8P0y095uQcDdK0YjCh4x7wVSov+lrmOQ==","buyer_id":"2088102534368455","invoice_amount":"0.10","notify_id":"2019081500222155624068450559358070","fund_bill_list":[{"amount":"0.10","fundChannel":"ALIPAYACCOUNT"}],"notify_type":"trade_status_sync","trade_status":"TRADE_SUCCESS","receipt_amount":"0.10","buyer_pay_amount":"0.10","app_id":"2019073166072302","seller_id":"2088531891668739","gmt_payment":"2019-08-15 15:56:24","notify_time":"2019-08-15 15:56:25","version":"1.0","out_trade_no":"20190815155618536-564-57","total_amount":"0.10","trade_no":"2019081522001468450512505578","auth_app_id":"2019073166072302","buyer_logon_id":"xud***@126.com","point_amount":"0.00"});
 
-        let result = sdk.check_notify_sign(post_data.as_object().unwrap());
+        let result = sdk.check_notify_sign(post_data.as_object().unwrap())?;
 
         assert_eq!(result, true);
 
@@ -1123,17 +1212,21 @@ mod tests {
         // let result = sdk.check_notify_sign(post_data.as_object().unwrap());
         //
         // assert_eq!(result, true);
+
+        Ok(())
     }
 
     #[test]
-    fn test_check_notify_sign_verify_fail() {
+    fn test_check_notify_sign_verify_fail() -> AlipayResult<()> {
         let sdk = new_check_notify_sign_sdk_should_delete_sign_type();
 
         let post_data = json!({"app_id":"2018121762595097","auth_app_id":"2false8121762595097","buyer_id":"2088512613526436","buyer_logon_id":"152****6706","buyer_pay_amount":"0.01","charset":"utf-8","fund_bill_list":[{"amount":"0.01","fundChannel":"PCREDIT"}],"gmt_create":"2019-05-23 14:13:56","gmt_payment":"2019-05-23 14:17:13","invoice_amount":"0.01","notify_id":"2019052300222141714026431019971405","notify_time":"2019-05-23 14:17:14","notify_type":"trade_status_sync","out_trade_no":"tpxy23962362669658","point_amount":"0.00","receipt_amount":"0.01","seller_email":"myapp@alitest.com","seller_id":"2088331578818800","sign":"T946S2qyNFAXLhAaRgNMmatxH6SO3MyWYFnTamQOgW1iAcheL/Zz+VoizwvEc6mTEwYewvvKS1wNkMQ1oEajMUHv9+cXQ9IFvU/qKS9Ktvw5xHvCaK0fj7LsVcQ7VxfyT3kSvXUDfKDP4cHSPuSZKwM2ybkzr53bIH9OUTpTQd2d3J0rbdf76OoUt+XF9vwqj7OVE7AGjH2HPWp842DgL/YVy4qeA9N2uFKRevT3YUskjaRxuI/E66reNjTMFhbjEqGLKvMcDD4BaQXnibq9ojAj60589fBwzKk3yWsVQmqGfksMQoheVMtZ3lAw4o2ty3TFngbVFFLwgx8FDpBZ9Q==","sign_type":"RSA2","subject":"tpxy2222896485","total_amount":"0.01","trade_no":"111111112019052322001426431037869358","trade_status":"TRADE_SUCCESS","version":"1.0"});
 
-        let result = sdk.check_notify_sign(post_data.as_object().unwrap());
+        let result = sdk.check_notify_sign(post_data.as_object().unwrap())?;
 
         assert_eq!(result, false);
+
+        Ok(())
     }
 
     // fn new_pkcs8_sdk() -> AlipaySDK {
@@ -1151,16 +1244,16 @@ mod tests {
     //
     //     sdk
     // }
-
+    //
     // #[test]
     // fn test_pkcs8_with_validate_sign_is_true() {
     //     let sdk = new_pkcs8_sdk();
     //
+    //     let mut exec_args = ExecArgs::new();
+    //     exec_args.set_params(json!({"bizContent":{}}).as_object().unwrap().clone());
+    //
     //     let result = sdk
-    //         .exec(
-    //             "alipay.offline.market.shop.category.query".to_string(),
-    //             ExecArgs::new().with_params(json!({"bizContent":{}}).as_object().unwrap().clone()),
-    //         )
+    //         .exec("alipay.offline.market.shop.category.query", exec_args)
     //         .unwrap();
     //
     //     match result {

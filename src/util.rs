@@ -4,13 +4,10 @@ use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvI
 use base64ct::{Base64, Encoding};
 use convert_case::{Case, Casing};
 use rsa::pkcs8::DecodePublicKey;
-use rsa::sha2::{Digest, Sha256};
-use rsa::{Pkcs1v15Sign, RsaPublicKey};
+use rsa::RsaPublicKey;
 use serde_json::Value;
-use urlencoding::encode;
-use x509_parser::nom::AsBytes;
 
-use crate::alipay::KeyType;
+use crate::alipay::{KeyType, SignType};
 use crate::{
     alipay::AlipaySdkConfig,
     error::{AlipayResult, Error},
@@ -175,25 +172,29 @@ pub fn sign(method: &str, params: ParamsMap, config: &AlipaySdkConfig) -> Alipay
     // 排序
     let mut keys = decamelize_params.keys().collect::<Vec<&String>>();
     keys.sort();
-    let sign_str = keys
-        .iter()
-        .map(|k| {
-            let data = &decamelize_params[k.to_owned()];
 
-            let v = value_to_string(data);
-            trace!("key={} value={}({})", k, v, v.len());
+    let mut queries = Vec::with_capacity(keys.len());
+    for key in keys.iter() {
+        let data = &decamelize_params[key.to_owned()];
 
-            format!("{}={}", k, encode(&v))
-        })
-        .collect::<Vec<String>>()
-        .join("&");
+        let v = match data {
+            Value::Array(_) => return Err(Error::Sign("暂不支持处理数组".to_owned())),
+            _ => value_to_string(data),
+        };
+
+        trace!("key={} value={}({})", key, v, v.len());
+
+        let query = format!("{}={}", key, v);
+        queries.push(query);
+    }
+    let sign_str = queries.join("&");
     debug!("sign str: {}", sign_str);
 
     let sign = sign_with_rsa(
         &config.key_type,
         &config.private_key,
         &sign_str,
-        config.sign_type.signature(),
+        &config.sign_type,
     )?;
     debug!("sign: {:?}", sign);
 
@@ -213,13 +214,13 @@ pub fn sign_with_rsa(
     key_type: &KeyType,
     private_key: &str,
     sign_str: &str,
-    signature: Pkcs1v15Sign,
+    sign_type: &SignType,
 ) -> AlipayResult<Vec<u8>> {
     let private_key = key_type.deserialize_rsa_private_key(private_key)?;
-    let digest = Sha256::digest(sign_str.as_bytes());
+    let digest = sign_type.digest(sign_str);
 
     let signature = private_key
-        .sign(signature, &digest)
+        .sign(sign_type.signature(), &digest)
         .map_err(|e| Error::Sign(e.to_string()))?;
 
     Ok(signature)
@@ -227,24 +228,20 @@ pub fn sign_with_rsa(
 
 /// 验签。
 ///
-/// 需要注意，sign 应该是 base64 decode 后的数据，不要直接将 base64str.as_bytes() 作为 sign 传入
+/// 需要注意，sign 应该是 base64 decode 后的数据，不要直接将`base64str.as_bytes()`作为 sign 传入
 pub fn verify_with_rsa(
     data: &[u8],
     public_key: &str,
     sign: &[u8],
-    signature: Pkcs1v15Sign,
-) -> AlipayResult<()> {
-    // TODO: 根据 sign type 使用不同的 digital, 默认使用 Pkcs1v15Sign
+    sign_type: &SignType,
+) -> AlipayResult<bool> {
     let public_key = deserialize_rsa_public_key(public_key)?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(data.as_bytes());
-
-    match public_key.verify(signature, &hasher.finalize(), sign) {
-        Ok(()) => Ok(()),
+    match public_key.verify(sign_type.signature(), &sign_type.hash(data), sign) {
+        Ok(()) => Ok(true),
         Err(e) => {
             error!("验签错误: {}", e);
-            Err(Error::Sign(e.to_string()))
+            Ok(false)
         }
     }
 }
@@ -255,9 +252,12 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::alipay::{AlipaySdkBuilder, SignType};
+    use crate::{
+        alipay::{AlipaySdkBuilder, SignType},
+        error::AlipayResult,
+    };
 
-    use super::sign;
+    use super::{base64_decode, sign, verify_with_rsa};
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -307,5 +307,28 @@ mod tests {
 
         assert_eq!(data2["biz_content"], json!({"a_b":1,"a_bc":"Ab"}));
         assert_eq!(data["sign"], data2["sign"]);
+    }
+
+    #[test]
+    fn test_verify_sign_should_success() -> AlipayResult<()> {
+        init();
+
+        let alipay_public_key = AlipaySdkBuilder::format_key(
+            include_str!("../examples/fixtures/alipay-public-key.pem"),
+            "PUBLIC KEY",
+        );
+        let sign_type = SignType::default();
+
+        let sign = "NNOVPB/nOWMbUHbpvk+8YNcdbnNz40GsMpU/5+KrGPIqXT8Fc//A/cXtgZbE914ERg3PCGIy5l4C7yKSNOu+7WRUFQwnSUz2LMMkDul3QnqDwLwPfzTXMoofGTxiNgG+lW0rZ64+HvMQAHx//+6DNLJxPey9xaIgNom3CEr1LzpVBmhYAI9vdYHHLyyQ0bUSxaUB7lPdNOJxmbMNyPZ4mNK0pJ7B/gDTlCeT8oqy3h8B80kSs8FnMyucHu01JoC9XAydeST0L/jJ0zCFrsIZpYdhfy9yTM52NH890MRbX3GXECECDsvAgCR8H/DHUfbP2mqG+W/6lnbRBpUnfuV4zQ==";
+        let sign_content = r#"{"code":"40002","msg":"Invalid Arguments","sub_code":"isv.upload-fail","sub_msg":"文件上传失败"}"#;
+        let result = verify_with_rsa(
+            sign_content.as_bytes(),
+            &alipay_public_key,
+            &base64_decode(sign).unwrap(),
+            &sign_type,
+        )?;
+        assert_eq!(result, true);
+
+        Ok(())
     }
 }
