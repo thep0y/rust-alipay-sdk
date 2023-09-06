@@ -1,5 +1,5 @@
 use std::{fs, path::Path};
-use x509_parser::prelude::*;
+use x509_parser::pem::parse_x509_pem;
 
 use crate::{
     error::{AlipayResult, Error},
@@ -9,20 +9,22 @@ use crate::{
 /// 从公钥证书文件里读取支付宝公钥
 pub(crate) fn load_public_key_from_path<P: AsRef<Path>>(file_path: P) -> AlipayResult<String> {
     let file_data = fs::read(file_path)?;
-    let (_, cert) =
-        X509Certificate::from_der(&file_data).map_err(|e| Error::X509(e.to_string()))?;
-    let encoded = base64_encode(cert.public_key().raw);
-
-    Ok(encoded)
+    load_public_key(file_data)
 }
 
 /// 从公钥证书内容或buffer读取支付宝公钥
 pub(crate) fn load_public_key<B: AsRef<[u8]>>(content: B) -> AlipayResult<String> {
-    let (_, cert) =
-        X509Certificate::from_der(content.as_ref()).map_err(|e| Error::X509(e.to_string()))?;
-    let encoded = base64_encode(cert.public_key().raw);
+    let (_, cert) = parse_x509_pem(content.as_ref()).map_err(|e| {
+        error!("{}", e);
+        Error::X509(e.to_string())
+    })?;
 
-    Ok(encoded)
+    let x509 = cert.parse_x509().map_err(|e| {
+        error!("{}", e);
+        Error::X509(e.to_string())
+    })?;
+
+    Ok(base64_encode(x509.public_key().raw))
 }
 
 pub(crate) fn get_sn_from_path<P: AsRef<Path>>(
@@ -103,4 +105,40 @@ fn get_root_cert_sn(root_content: impl AsRef<[u8]>) -> AlipayResult<String> {
     }
 
     Ok(root_cert_sn)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::AlipayResult;
+
+    use super::{load_public_key, load_public_key_from_path};
+
+    const ALIPAY_PUBLIC_CERT_PATH: &str = "examples/fixtures/alipayCertPublicKey_RSA2.crt";
+    const PUBLIC_KEY_VAL: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhoVesfcGvUv1XvUndmX0rmSZ/2posJBCooySbSVFpV79RtHMzrVz2aKkC3WvOXeT5iNeQK4mK8gp3vNkWrHTkQGx5BcmkeO1WS384CQde7dAS0gmxeFs5bs+cCQqV2A2c2R9/5rJMtFtp1Ot/rIiMBUn6Ei0UoztM7AneavqQEzSwYlCKNhPFFtHCiz7u4O5R9CIyvUmYr+zpem2HXBN9ygPAZ0aXBQipGbc45+G07ZCNsmY4hV/Igya1aBf+Ye8p10Ew8uBBri0sIknhSC2LqKKy2IH1fO6q1d1jhN240QRHvbpRNv60kAfZsEulBASBrCMBi49NiJyr5nre7SNywIDAQAB";
+
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[test]
+    fn test_load_public_key_from_path() -> AlipayResult<()> {
+        init();
+
+        let public_key = load_public_key_from_path(ALIPAY_PUBLIC_CERT_PATH)?;
+
+        assert_eq!(public_key, PUBLIC_KEY_VAL);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_public_key() -> AlipayResult<()> {
+        let cert = include_str!("../examples/fixtures/alipayCertPublicKey_RSA2.crt");
+
+        let public_key = load_public_key(cert)?;
+
+        assert_eq!(public_key, PUBLIC_KEY_VAL);
+
+        Ok(())
+    }
 }
