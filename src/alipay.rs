@@ -703,8 +703,9 @@ impl AlipaySDK {
             .send_json(exec_params)?;
 
         if resp.status() != 200 {
+            error!("状态码异常: {}", resp.status());
             return Err(Error::Http(HttpError::new(
-                resp.into_json()?,
+                None,
                 "[AlipaySdk]HTTP 请求错误",
             )));
         }
@@ -724,10 +725,7 @@ impl AlipaySDK {
         let result = if let Some(r) = json.as_object() {
             r
         } else {
-            return Err(Error::Http(HttpError::new(
-                serde_json::from_value(json).unwrap(),
-                "[AlipaySdk]响应体为空",
-            )));
+            return Err(Error::Http(HttpError::new(None, "[AlipaySdk]响应体为空")));
         };
 
         let response_key = method.replace(".", "_") + "_response";
@@ -735,7 +733,7 @@ impl AlipaySDK {
             Some(d) => d.clone(),
             None => {
                 return Err(Error::Http(HttpError::new(
-                    serde_json::from_value(json).unwrap(),
+                    None,
                     "[AlipaySdk]HTTP 请求错误",
                 )))
             }
@@ -757,7 +755,7 @@ impl AlipaySDK {
 
         if !validate_success {
             return Err(Error::Http(HttpError::new(
-                serde_json::from_value(json).unwrap(),
+                serde_json::from_value(data).unwrap(),
                 "[AlipaySdk]验签失败",
             )));
         }

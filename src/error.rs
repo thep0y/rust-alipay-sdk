@@ -1,22 +1,15 @@
 use std::{fmt::Display, string, time::SystemTimeError};
 
-use serde::{Deserialize, Serialize};
-
 use crate::AlipaySdkCommonResult;
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AlipaySecurityRiskContentAnalyzeResponse {
-    alipay_security_risk_content_analyze_response: AlipaySdkCommonResult,
-}
 
 #[derive(Debug)]
 pub struct HttpError {
-    result: AlipaySecurityRiskContentAnalyzeResponse,
+    result: Option<AlipaySdkCommonResult>,
     msg: String,
 }
 
 impl HttpError {
-    pub(crate) fn new(result: AlipaySecurityRiskContentAnalyzeResponse, msg: &str) -> Self {
+    pub(crate) fn new(result: Option<AlipaySdkCommonResult>, msg: &str) -> Self {
         Self {
             result,
             msg: msg.to_owned(),
