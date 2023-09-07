@@ -22,7 +22,49 @@ use crate::{
     AlipaySdkCommonResult, ParamsMap,
 };
 
-// const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub struct IRequestParams {
+    biz_content: ParamsMap,
+    need_encrypt: bool,
+}
+
+pub struct PageRequestParams {
+    method: Method,
+    biz_content: ParamsMap,
+    return_url: Option<String>,
+}
+
+impl PageRequestParams {
+    pub fn new(method: Method, biz_content: &Value, return_url: Option<String>) -> Self {
+        Self {
+            method,
+            biz_content: biz_content.as_object().unwrap().clone(),
+            return_url,
+        }
+    }
+
+    fn to_form(&self) -> AlipayResult<AlipayForm> {
+        let mut form = AlipayForm::new();
+
+        form.add_object_field("bizContent", &self.biz_content);
+
+        match self.method {
+            Method::GET => {
+                form.set_method(Method::GET);
+                match &self.return_url {
+                    Some(url) => form.add_field("return_url", &url),
+                    None => {
+                        return Err(Error::Other(
+                            "使用 GET 请求时 return_url 不能为空".to_string(),
+                        ))
+                    }
+                }
+            }
+            Method::POST => form.set_method(Method::POST),
+        }
+
+        Ok(form)
+    }
+}
 
 #[derive(Debug)]
 pub enum SignType {
@@ -528,15 +570,8 @@ impl AlipaySDK {
     }
 
     /// 生成网站接口请求链接或表单
-    pub fn page_exec(&self, method: &str, params: ParamsMap) -> AlipayResult<String> {
-        let mut form_data = AlipayForm::new();
-        for (k, v) in params.iter() {
-            if k == "method" {
-                form_data.set_method(Method::from_string(&v.to_string()));
-            } else {
-                form_data.add_field(k.clone(), v.to_string());
-            }
-        }
+    pub fn page_exec(&self, method: &str, params: PageRequestParams) -> AlipayResult<String> {
+        let form_data = params.to_form()?;
 
         self._page_exec(method, form_data)
     }
@@ -563,7 +598,7 @@ impl AlipaySDK {
         if form_data.get_method() == &Method::GET {
             let query = exec_params
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, encode(&v.to_string())))
+                .map(|(k, v)| format!("{}={}", k, encode(&value_to_string(v))))
                 .collect::<Vec<String>>()
                 .join("&");
 
@@ -577,7 +612,7 @@ impl AlipaySDK {
         let inputs = exec_params
             .iter()
             .map(|(k, v)| {
-                let value = v.to_string().replace("\"", "&quot;");
+                let value = value_to_string(v).replace("\"", "&quot;");
                 format!(r#"<input type="hidden" name="{}" value="{}" />"#, k, value)
             })
             .collect::<Vec<String>>()

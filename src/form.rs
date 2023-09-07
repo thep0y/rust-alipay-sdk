@@ -26,6 +26,13 @@ impl Method {
             _ => Method::POST,
         }
     }
+
+    pub fn to_string(&self) -> String {
+        match self {
+            Method::GET => String::from("GET"),
+            Method::POST => String::from("POST"),
+        }
+    }
 }
 
 pub struct AlipayForm {

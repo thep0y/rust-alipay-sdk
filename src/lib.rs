@@ -2,7 +2,6 @@ pub mod alipay;
 pub mod antcertutil;
 pub mod error;
 pub mod form;
-pub mod multipart;
 pub mod time;
 pub mod util;
 
