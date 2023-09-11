@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::convert::Into;
 
-use crate::ParamsMap;
+use crate::request::Method;
 
 pub struct IFile {
     pub(crate) path: String,
@@ -11,28 +11,6 @@ pub struct IFile {
 pub struct IField {
     pub(crate) name: String,
     pub(crate) value: Value,
-}
-
-#[derive(PartialEq)]
-pub enum Method {
-    GET,
-    POST,
-}
-
-impl Method {
-    pub fn from_string(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "get" => Method::GET,
-            _ => Method::POST,
-        }
-    }
-
-    pub fn to_string(&self) -> String {
-        match self {
-            Method::GET => String::from("GET"),
-            Method::POST => String::from("POST"),
-        }
-    }
 }
 
 pub struct AlipayForm {
@@ -63,7 +41,6 @@ impl AlipayForm {
     }
 
     /// 设置 method
-    ///
     /// post、get 的区别在于 post 会返回 form 表单，get 返回 url
     pub fn set_method(&mut self, method: Method) {
         self.method = method;
@@ -77,10 +54,10 @@ impl AlipayForm {
         })
     }
 
-    pub fn add_object_field<I: Into<String>>(&mut self, field_name: I, value: &ParamsMap) {
+    pub fn add_object_field<I: Into<String>>(&mut self, field_name: I, value: &Value) {
         self.fields.push(IField {
             name: field_name.into(),
-            value: Value::Object(value.clone()),
+            value: value.clone(),
         })
     }
 

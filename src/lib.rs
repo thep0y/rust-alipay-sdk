@@ -2,6 +2,10 @@ pub mod alipay;
 pub mod antcertutil;
 pub mod error;
 pub mod form;
+pub mod method;
+pub mod model;
+pub mod product_code;
+pub mod request;
 pub mod time;
 pub mod util;
 

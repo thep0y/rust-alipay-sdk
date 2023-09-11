@@ -14,57 +14,14 @@ use urlencoding::{decode, encode};
 use crate::{
     antcertutil::{get_sn, get_sn_from_path, load_public_key, load_public_key_from_path},
     error::{AlipayResult, Error, HttpError},
-    form::{AlipayForm, IField, IFile, Method},
+    form::{AlipayForm, IField, IFile},
+    request::Method,
     time::now,
     util::{
         aes_decrypt, base64_decode, keys_to_camel_case, sign, value_to_string, verify_with_rsa,
     },
     AlipaySdkCommonResult, ParamsMap,
 };
-
-pub struct IRequestParams {
-    biz_content: ParamsMap,
-    need_encrypt: bool,
-}
-
-pub struct PageRequestParams {
-    method: Method,
-    biz_content: ParamsMap,
-    return_url: Option<String>,
-}
-
-impl PageRequestParams {
-    pub fn new(method: Method, biz_content: &Value, return_url: Option<String>) -> Self {
-        Self {
-            method,
-            biz_content: biz_content.as_object().unwrap().clone(),
-            return_url,
-        }
-    }
-
-    fn to_form(&self) -> AlipayResult<AlipayForm> {
-        let mut form = AlipayForm::new();
-
-        form.add_object_field("bizContent", &self.biz_content);
-
-        match self.method {
-            Method::GET => {
-                form.set_method(Method::GET);
-                match &self.return_url {
-                    Some(url) => form.add_field("return_url", &url),
-                    None => {
-                        return Err(Error::Other(
-                            "使用 GET 请求时 return_url 不能为空".to_string(),
-                        ))
-                    }
-                }
-            }
-            Method::POST => form.set_method(Method::POST),
-        }
-
-        Ok(form)
-    }
-}
 
 #[derive(Debug)]
 pub enum SignType {
@@ -220,10 +177,10 @@ pub struct AlipaySdkBuilder {
 }
 
 impl AlipaySdkBuilder {
-    pub fn new(app_id: String, private_key: String) -> Self {
+    pub fn new<S: Into<String>>(app_id: S, private_key: S) -> Self {
         AlipaySdkBuilder {
-            app_id,
-            private_key,
+            app_id: app_id.into(),
+            private_key: private_key.into(),
             sign_type: Default::default(),
             alipay_public_key: Default::default(),
             gateway: Default::default(),
@@ -299,8 +256,8 @@ impl AlipaySdkBuilder {
         self
     }
 
-    pub fn with_gateway(mut self, gateway: String) -> Self {
-        self.gateway = gateway;
+    pub fn with_gateway<S: Into<String>>(mut self, gateway: S) -> Self {
+        self.gateway = gateway.into();
         self
     }
 
@@ -570,14 +527,7 @@ impl AlipaySDK {
     }
 
     /// 生成网站接口请求链接或表单
-    pub fn page_exec(&self, method: &str, params: PageRequestParams) -> AlipayResult<String> {
-        let form_data = params.to_form()?;
-
-        self._page_exec(method, form_data)
-    }
-
-    /// page 类接口，兼容原来的 formData 格式
-    fn _page_exec(&self, method: &str, form_data: AlipayForm) -> AlipayResult<String> {
+    pub fn page_exec(&self, method: &str, form_data: AlipayForm) -> AlipayResult<String> {
         let mut sign_params = ParamsMap::with_capacity(form_data.get_fields().len() + 1);
         sign_params.insert(
             "alipaySdk".to_owned(),
@@ -722,7 +672,7 @@ impl AlipaySDK {
 
             // fromData 中不包含文件时，认为是 page 类接口（返回 form 表单）
             // 比如 PC 端支付接口 alipay.trade.page.pay
-            return Ok(AlipaySdkResult::String(self._page_exec(method, form)?));
+            return Ok(AlipaySdkResult::String(self.page_exec(method, form)?));
         }
 
         // 计算签名
